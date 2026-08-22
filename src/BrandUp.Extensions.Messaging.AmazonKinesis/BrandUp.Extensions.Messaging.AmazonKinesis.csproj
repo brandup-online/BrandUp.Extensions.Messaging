@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>BrandUp.Extensions.Messaging</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Authors>Dmitry Kovyazin</Authors>
+    <Company>BrandUp</Company>
+    <Title>BrandUp.Extensions.Messaging.AmazonKinesis</Title>
+    <Description>Kinesis-compatible message stream implementation using AWS SDK. Supports Amazon Kinesis Data Streams and Yandex Data Streams. Publishing with partition keys, and a hosted shard reader with checkpoints and resharding support.</Description>
+    <PackageTags>kinesis;datastreams;messaging;stream;awssdk;yandexcloud;cloud</PackageTags>
+    <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.Messaging</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\AwsConnection.cs" Link="Internals\AwsConnection.cs" />
+    <Compile Include="..\Shared\RegistrationGuards.cs" Link="Internals\RegistrationGuards.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.Kinesis" Version="4.0.101" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BrandUp.Extensions.Messaging.Abstraction\BrandUp.Extensions.Messaging.Abstraction.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BrandUp.Extensions.Messaging.AmazonKinesis.Tests" />
+  </ItemGroup>
+
+</Project>

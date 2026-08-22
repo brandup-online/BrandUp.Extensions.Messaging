@@ -1,0 +1,25 @@
+# Changelog
+
+## 1.0
+
+Первый выпуск.
+
+Ключевые решения, принятые по итогам ревью до релиза:
+
+- Переопределение в `Queues`/`Streams` — точное физическое имя, префикс/суффикс окружения к нему не применяются.
+- FIFO без `ContentBasedDeduplication`: на каждую публикацию без явного `DeduplicationId` генерируется уникальный id.
+- Ядовитые сообщения (кривой payload или чужой `BrandUp-MessageType`): политика `QueueSettings.PoisonMessageHandling` — `Redeliver` (по умолчанию, до DLQ) или `Delete`.
+- Один тип сообщения — одна очередь/стрим и один обработчик; повторная привязка — исключение на регистрации (в т.ч. между транспортами).
+- Статические ключи опциональны: без них используется стандартная цепочка учётных данных AWS SDK (IAM-роли).
+- `ReceiveAsync` по умолчанию — long polling 20 сек; опции консьюмера валидируются на старте хоста; обработанные сообщения удаляются батчем.
+- Контексты мессаджинга (`MessagingContext`, по образцу `ObjectStorageContext`): очереди свойствами, именованные подключения (`AddSqsMessagingConnection` + `AddSqsMessaging<TContext>`), провижининг `EnsureQueuesAsync`, фейковый контекст `AddFakeMessaging<TContext>`.
+- Hosted-консьюмер соблюдает порядок FIFO внутри группы: группы обрабатываются по одной записи за раз, после ошибки остаток группы остаётся на повторную доставку. `ReceivedMessage.GroupId` доступен обработчику.
+- Ядовитым считается и сообщение, чей payload не читается любым исключением сериализатора (не только `MessagingException`), — батч при этом не теряется; удаление ядовитых сообщений батчем.
+- `QueueSettings` валидируются на регистрации; зарезервированный атрибут `BrandUp-MessageType` нельзя перезаписать; `PublishOptions` с неподдерживаемыми для транспорта значениями отвергаются, а не игнорируются.
+- Чтение стримов: `ICheckpointStore`, `KinesisConsumerService` (шарды, чекпоинты, повторы, решардинг), `AddMongoCheckpoints`, `AddInMemoryCheckpoints`.
+
+- `BrandUp.Extensions.Messaging.Abstraction` — контракты: `IMessagePublisher`, `IMessageQueue<T>`, `IMessageStream<T>`, `IMessageHandler<T>`, JSON-сериализация, разрешение имён очередей (префикс/суффикс окружения, `.fifo`).
+- `BrandUp.Extensions.Messaging.AmazonSqs` — очереди поверх AWSSDK.SQS: Amazon SQS, Yandex Message Queue, ElasticMQ. Типизированные очереди, hosted-консьюмеры с long polling, FIFO, автосоздание очередей с dead-letter.
+- `BrandUp.Extensions.Messaging.AmazonKinesis` — стримы поверх AWSSDK.Kinesis: Amazon Kinesis Data Streams, Yandex Data Streams. Публикация с partition key и hosted-ридер шардов с чекпоинтами, повторами и отслеживанием решардинга.
+- `BrandUp.Extensions.Messaging.MongoDB` — хранилище чекпоинтов (`ICheckpointStore`) в MongoDB: одна запись на шард и группу читателей, обновление одним upsert.
+- `BrandUp.Extensions.Messaging.Testing` — in-memory шина для тестов: захват публикаций, фейковые очереди с сериализацией и лимитами продового транспорта, доставка в обработчики, `InMemoryCheckpointStore`.

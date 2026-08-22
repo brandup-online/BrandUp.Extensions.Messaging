@@ -1,0 +1,257 @@
+trigger:
+  - main
+
+pr: none
+
+resources:
+  - repo: self
+
+variables:
+  - group: public-nuget
+  - name: vmImageName
+    value: "ubuntu-latest"
+  - name: restore-projects
+    value: "**/*.csproj"
+  - name: test-projects
+    value: "**/*[Tt]ests/*.csproj"
+  - name: pack-projects
+    value: "**/src/*/*.csproj"
+  - name: buildPlatform
+    value: "Any CPU"
+  - name: buildConfiguration
+    value: "Release"
+  - name: envName
+    value: "brandup-extensions-messaging"
+  - name: version-major
+    value: "1"
+  - name: version-minor
+    value: "0"
+
+name: $(version-major).$(version-minor).$(rev:r)
+
+pool:
+  name: Test
+
+stages:
+  - stage: Build
+    displayName: Build stage
+    jobs:
+      - job: BuildNet
+        displayName: Build NET
+        pool:
+          name: Test
+          workspace:
+            clean: all
+        steps:
+          - script: |
+              echo "BrandUp.Extensions.Messaging $(Build.BuildNumber)"
+            displayName: "print version"
+
+          - checkout: self
+            fetchDepth: 1
+            clean: "true"
+            persistCredentials: "true"
+
+          - task: UseDotNet@2
+            displayName: "use dotnet 10.x"
+            inputs:
+              packageType: "sdk"
+              version: "10.x"
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet restore"
+            inputs:
+              command: "restore"
+              projects: $(restore-projects)
+              feedRestore: "BrandUp"
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet build"
+            inputs:
+              command: "build"
+              projects: $(restore-projects)
+              arguments: --configuration $(buildConfiguration) /p:Version=$(Build.BuildNumber)
+
+          # Results and coverage are published by explicit tasks below, so the paths are known here rather
+          # than left to the task defaults. --report-trx and --coverage come from the Microsoft.Testing
+          # extensions referenced by every test project.
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet test"
+            inputs:
+              command: test
+              projects: $(test-projects)
+              arguments: >
+                --configuration $(buildConfiguration) --no-build --no-restore
+                --results-directory $(Agent.TempDirectory)/TestResults
+                --report-trx
+                --coverage --coverage-output-format cobertura
+              publishTestResults: false
+
+          - task: PublishTestResults@2
+            displayName: "publish test results"
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: "*.trx"
+              searchFolder: $(Agent.TempDirectory)/TestResults
+              testRunTitle: "solution tests"
+              mergeTestResults: true
+              failTaskOnFailedTests: true
+
+          # Only the top level: the same reports are duplicated under In/<machine>/, and a ** pattern would
+          # count every file twice.
+          - task: PublishCodeCoverageResults@2
+            displayName: "publish code coverage"
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: $(Agent.TempDirectory)/TestResults/*.cobertura.xml
+              pathToSources: $(Build.SourcesDirectory)
+              failIfCoverageEmpty: true
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet pack"
+            inputs:
+              command: "custom"
+              projects: $(pack-projects)
+              custom: "pack"
+              arguments: "--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory) /p:Version=$(Build.BuildNumber)"
+
+          - publish: $(build.artifactstagingdirectory)
+            displayName: publish artifact
+            condition: succeededOrFailed()
+            artifact: net
+
+      - job: IntegrationTests
+        displayName: Integration tests (ElasticMQ, LocalStack, MongoDB)
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            clean: "true"
+
+          - task: UseDotNet@2
+            displayName: "use dotnet 10.x"
+            inputs:
+              packageType: "sdk"
+              version: "10.x"
+
+          # ElasticMQ backs the SQS tests, LocalStack the Kinesis reader, MongoDB the checkpoint store.
+          # LocalStack is pinned to the community edition: newer images require a licence.
+          - script: |
+              docker run -d --name elasticmq -p 9324:9324 softwaremill/elasticmq-native
+              docker run -d --name localstack -p 4566:4566 -e SERVICES=kinesis -e EAGER_SERVICE_LOADING=1 localstack/localstack:3.8
+              docker run -d --name mongo -p 27017:27017 mongo:7
+
+              wait_for() {
+                echo "waiting for $1..."
+                for i in $(seq 1 60); do
+                  if eval "$2" >/dev/null 2>&1; then echo "$1 is ready"; return 0; fi
+                  sleep 2
+                done
+                echo "$1 did not become ready in time"; return 1
+              }
+
+              wait_for "ElasticMQ" "curl -s -o /dev/null http://localhost:9324" || exit 1
+              wait_for "LocalStack Kinesis" "curl -s http://localhost:4566/_localstack/health | grep -q '\"kinesis\": *\"\\(available\\|running\\)\"'" || exit 1
+              wait_for "MongoDB" "docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 })'" || exit 1
+            displayName: "start service containers"
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet test (integration)"
+            env:
+              SQS_SERVICE_URL: http://localhost:9324
+              SQS_ACCESS_KEY: elasticmq
+              SQS_SECRET_KEY: elasticmq
+              KINESIS_SERVICE_URL: http://localhost:4566
+              KINESIS_ACCESS_KEY: test
+              KINESIS_SECRET_KEY: test
+              KINESIS_REGION: us-east-1
+              MONGO_CONNECTION_STRING: mongodb://localhost:27017
+            inputs:
+              command: test
+              projects: $(test-projects)
+              arguments: >
+                --configuration $(buildConfiguration)
+                --filter-trait Category=Integration
+                --results-directory $(Agent.TempDirectory)/TestResults
+                --report-trx
+                --coverage --coverage-output-format cobertura
+              publishTestResults: false
+
+          - task: PublishTestResults@2
+            displayName: "publish test results (integration)"
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: "*.trx"
+              searchFolder: $(Agent.TempDirectory)/TestResults
+              testRunTitle: "integration tests (ElasticMQ, LocalStack, MongoDB)"
+              failTaskOnFailedTests: true
+
+          # Kept as an artifact rather than published as a second coverage result: this job runs on a
+          # different agent, so its report names the same sources by a different absolute path and merging
+          # the two would list every file twice.
+          - task: CopyFiles@2
+            displayName: "collect integration coverage"
+            condition: succeededOrFailed()
+            inputs:
+              sourceFolder: $(Agent.TempDirectory)/TestResults
+              contents: "*.cobertura.xml"
+              targetFolder: $(Build.ArtifactStagingDirectory)/coverage
+
+          - publish: $(Build.ArtifactStagingDirectory)/coverage
+            displayName: "publish integration coverage"
+            condition: succeededOrFailed()
+            artifact: coverage-integration
+
+          - script: docker rm -f elasticmq localstack mongo
+            displayName: "stop service containers"
+            condition: always()
+
+      - job: GitTag
+        displayName: Add git tag
+        dependsOn: [BuildNet, IntegrationTests]
+        condition: succeeded()
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            clean: "true"
+            persistCredentials: "true"
+
+          - powershell: |
+              git config --global user.name "AzureDevOps Agent"
+              git tag "$(Build.BuildNumber)" --force
+              git push origin "$(Build.BuildNumber)" --force
+              Write-Output "Tagging $(Build.Repository.Name) with $(Build.BuildNumber)"
+            displayName: set git tag
+
+  - stage: Production
+    displayName: Deploy stage
+    dependsOn: Build
+    jobs:
+      - deployment: Production
+        condition: succeeded()
+        displayName: Production
+        pool:
+          vmImage: $(vmImageName)
+        environment: $(envName)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: UseDotNet@2
+                  displayName: "use dotnet 10.x"
+                  inputs:
+                    packageType: "sdk"
+                    version: "10.x"
+
+                - task: DotNetCoreCLI@2
+                  displayName: 'publish nuget'
+                  inputs:
+                    command: custom
+                    custom: nuget
+                    arguments: >
+                      push $(Pipeline.Workspace)/net/*.nupkg
+                      -s $(nuget-api-url)
+                      -k $(nuget-api-key)

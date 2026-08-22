@@ -1,0 +1,12 @@
+<Solution>
+  <Project Path="src/BrandUp.Extensions.Messaging.Abstraction/BrandUp.Extensions.Messaging.Abstraction.csproj" />
+  <Project Path="src/BrandUp.Extensions.Messaging.AmazonSqs/BrandUp.Extensions.Messaging.AmazonSqs.csproj" />
+  <Project Path="src/BrandUp.Extensions.Messaging.AmazonKinesis/BrandUp.Extensions.Messaging.AmazonKinesis.csproj" />
+  <Project Path="src/BrandUp.Extensions.Messaging.MongoDB/BrandUp.Extensions.Messaging.MongoDB.csproj" />
+  <Project Path="src/BrandUp.Extensions.Messaging.Testing/BrandUp.Extensions.Messaging.Testing.csproj" />
+  <Project Path="test/BrandUp.Extensions.Messaging.Abstraction.Tests/BrandUp.Extensions.Messaging.Abstraction.Tests.csproj" />
+  <Project Path="test/BrandUp.Extensions.Messaging.AmazonSqs.Tests/BrandUp.Extensions.Messaging.AmazonSqs.Tests.csproj" />
+  <Project Path="test/BrandUp.Extensions.Messaging.AmazonKinesis.Tests/BrandUp.Extensions.Messaging.AmazonKinesis.Tests.csproj" />
+  <Project Path="test/BrandUp.Extensions.Messaging.MongoDB.Tests/BrandUp.Extensions.Messaging.MongoDB.Tests.csproj" />
+  <Project Path="test/BrandUp.Extensions.Messaging.Testing.Tests/BrandUp.Extensions.Messaging.Testing.Tests.csproj" />
+</Solution>

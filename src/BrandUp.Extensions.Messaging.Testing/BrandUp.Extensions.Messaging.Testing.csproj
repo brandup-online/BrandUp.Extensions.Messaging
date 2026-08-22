@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>BrandUp.Extensions.Messaging</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Authors>Dmitry Kovyazin</Authors>
+    <Company>BrandUp</Company>
+    <Title>BrandUp.Extensions.Messaging.Testing</Title>
+    <Description>In-memory fake implementations of BrandUp.Extensions.Messaging abstractions for use in unit and integration tests. No dependency on AWS SDK.</Description>
+    <PackageTags>messaging;queue;testing;fake;inmemory;xunit</PackageTags>
+    <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.Messaging</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\RegistrationGuards.cs" Link="Internals\RegistrationGuards.cs" />
+    <Compile Include="..\Shared\SqsLimits.cs" Link="Internals\SqsLimits.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BrandUp.Extensions.Messaging.Abstraction\BrandUp.Extensions.Messaging.Abstraction.csproj" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BrandUp.Extensions.Messaging.Testing.Tests" />
+  </ItemGroup>
+
+</Project>

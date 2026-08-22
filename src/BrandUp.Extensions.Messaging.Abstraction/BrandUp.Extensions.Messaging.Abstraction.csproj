@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>BrandUp.Extensions.Messaging</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Authors>Dmitry Kovyazin</Authors>
+    <Company>BrandUp</Company>
+    <Title>BrandUp.Extensions.Messaging.Abstraction</Title>
+    <Description>Abstractions for message queues and streams: IMessagePublisher, IMessageQueue, IMessageStream, IMessageHandler, JSON serialization. No dependency on AWS SDK.</Description>
+    <PackageTags>messaging;queue;sqs;kinesis;abstractions;cloud;yandexcloud</PackageTags>
+    <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.Messaging</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Queue-name resolution and the routing publisher are shared infrastructure of the provider packages. -->
+    <InternalsVisibleTo Include="BrandUp.Extensions.Messaging.AmazonSqs" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.Messaging.AmazonKinesis" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.Messaging.Testing" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.Messaging.Abstraction.Tests" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.Messaging.AmazonSqs.Tests" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.Messaging.Testing.Tests" />
+  </ItemGroup>
+
+</Project>

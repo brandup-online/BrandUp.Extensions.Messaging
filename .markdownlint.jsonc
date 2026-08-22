@@ -1,0 +1,5 @@
+{
+  // Line length is not a rule this documentation can follow: a Markdown table row cannot be wrapped at
+  // all, and the prose is written one line per paragraph, which keeps diffs readable per paragraph.
+  "MD013": false
+}
