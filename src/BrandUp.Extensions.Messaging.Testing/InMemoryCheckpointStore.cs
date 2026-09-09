@@ -35,7 +35,7 @@ public static class InMemoryCheckpointServiceCollectionExtensions
     /// Registers <see cref="InMemoryCheckpointStore"/> as the checkpoint store for tests. Repeated
     /// calls reuse the same instance, so what a test inspects is what the reader writes to.
     /// </summary>
-    public static IServiceCollection AddInMemoryCheckpoints(this IServiceCollection services)
+    public static IServiceCollection AddInMemoryMessagingCheckpoints(this IServiceCollection services)
     {
         ArgumentNullException.ThrowIfNull(services);
 

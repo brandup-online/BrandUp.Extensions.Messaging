@@ -96,11 +96,11 @@ public class MongoCheckpointStoreTests
     }
 
     [MongoFact]
-    public void AddMongoCheckpoints_ResolvesStore()
+    public void AddMongoMessagingCheckpoints_ResolvesStore()
     {
         var services = new ServiceCollection();
         services.AddSingleton<IMongoDatabase>(_ => new MongoClient(MongoEnvironment.ConnectionString).GetDatabase("registration-test"));
-        services.AddMongoCheckpoints();
+        services.AddMongoMessagingCheckpoints();
 
         using var provider = services.BuildServiceProvider();
 
@@ -108,10 +108,10 @@ public class MongoCheckpointStoreTests
     }
 
     [Fact]
-    public void AddMongoCheckpoints_WithoutDatabase_ThrowsWithHint()
+    public void AddMongoMessagingCheckpoints_WithoutDatabase_ThrowsWithHint()
     {
         var services = new ServiceCollection();
-        services.AddMongoCheckpoints();
+        services.AddMongoMessagingCheckpoints();
 
         using var provider = services.BuildServiceProvider();
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Не выпущено
+
+- Аренда шардов (`IShardLeaseStore`): несколько инстансов одной группы читателей делят стрим между собой. Шард арендуется перед чтением и продлевается, пока читается; аренда истекает, если инстанс перестал её продлевать, и шард забирает другой с последнего чекпоинта. Доля инстанса — шарды, делённые на число читателей с округлением вверх; передача шарда запрашивается только когда свободных не хватает, и происходит после текущей записи, а не на её середине. Реализации: `AddMongoMessagingShardLeases()` (коллекция `brandup.messaging.leases`, все переходы — условные обновления по `_id`) и `AddInMemoryMessagingShardLeases()` для тестов. Без регистрации хранилища поведение прежнее — один инстанс на группу.
+
 ## 1.0
 
 Первый выпуск.
@@ -16,7 +20,7 @@
 - Hosted-консьюмер соблюдает порядок FIFO внутри группы: группы обрабатываются по одной записи за раз, после ошибки остаток группы остаётся на повторную доставку. `ReceivedMessage.GroupId` доступен обработчику.
 - Ядовитым считается и сообщение, чей payload не читается любым исключением сериализатора (не только `MessagingException`), — батч при этом не теряется; удаление ядовитых сообщений батчем.
 - `QueueSettings` валидируются на регистрации; зарезервированный атрибут `BrandUp-MessageType` нельзя перезаписать; `PublishOptions` с неподдерживаемыми для транспорта значениями отвергаются, а не игнорируются.
-- Чтение стримов: `ICheckpointStore`, `KinesisConsumerService` (шарды, чекпоинты, повторы, решардинг), `AddMongoCheckpoints`, `AddInMemoryCheckpoints`.
+- Чтение стримов: `ICheckpointStore`, `KinesisConsumerService` (шарды, чекпоинты, повторы, решардинг), `AddMongoMessagingCheckpoints`, `AddInMemoryMessagingCheckpoints`.
 
 - `BrandUp.Extensions.Messaging.Abstraction` — контракты: `IMessagePublisher`, `IMessageQueue<T>`, `IMessageStream<T>`, `IMessageHandler<T>`, JSON-сериализация, разрешение имён очередей (префикс/суффикс окружения, `.fifo`).
 - `BrandUp.Extensions.Messaging.AmazonSqs` — очереди поверх AWSSDK.SQS: Amazon SQS, Yandex Message Queue, ElasticMQ. Типизированные очереди, hosted-консьюмеры с long polling, FIFO, автосоздание очередей с dead-letter.

@@ -42,12 +42,15 @@ public class KinesisMessagingBuilder
     /// stream, hands records to <typeparamref name="THandler"/> in their own DI scope and stores its
     /// position in the <see cref="ICheckpointStore"/> after each handled record.
     /// <para>
-    /// A checkpoint store must be registered — <c>AddMongoCheckpoints(…)</c> in production, or
-    /// <c>AddInMemoryCheckpoints()</c> from the Testing package. Without one the reader would restart
+    /// A checkpoint store must be registered — <c>AddMongoMessagingCheckpoints(…)</c> in production, or
+    /// <c>AddInMemoryMessagingCheckpoints()</c> from the Testing package. Without one the reader would restart
     /// from the beginning of the stream on every deploy, so registration fails instead.
     /// </para>
     /// <para>
-    /// One reader per shard is assumed: run one instance per consumer group, or give each instance its
+    /// A shard is read by one instance. Register an <see cref="IShardLeaseStore"/>
+    /// (<c>AddMongoMessagingShardLeases(…)</c>, or <c>AddInMemoryMessagingShardLeases()</c> in tests) to run several
+    /// instances in one consumer group: they lease the shards between them and take over from an
+    /// instance that stops. Without one, run a single instance per group — or give each instance its
     /// own <see cref="KinesisConsumerOptions.ConsumerGroup"/> if they should each see every record.
     /// </para>
     /// </summary>
@@ -69,10 +72,15 @@ public class KinesisMessagingBuilder
             var checkpoints = sp.GetService<ICheckpointStore>()
                 ?? throw new InvalidOperationException(
                     $"Reading stream {typeof(TMessage).Name} needs an {nameof(ICheckpointStore)}: register one " +
-                    "(AddMongoCheckpoints in production, AddInMemoryCheckpoints in tests) before AddConsumer, " +
+                    "(AddMongoMessagingCheckpoints in production, AddInMemoryMessagingCheckpoints in tests) before AddConsumer, " +
                     "or the reader would re-read the stream from the start after every restart.");
 
-            return ActivatorUtilities.CreateInstance<KinesisConsumerService<TMessage>>(sp, checkpoints);
+            // Optional: without a lease store the reader assumes it is the only one of its group.
+            var leases = sp.GetService<IShardLeaseStore>();
+
+            return leases is null
+                ? ActivatorUtilities.CreateInstance<KinesisConsumerService<TMessage>>(sp, checkpoints)
+                : ActivatorUtilities.CreateInstance<KinesisConsumerService<TMessage>>(sp, checkpoints, leases);
         });
 
         return this;

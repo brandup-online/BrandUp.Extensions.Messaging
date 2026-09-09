@@ -9,7 +9,7 @@
 | `BrandUp.Extensions.Messaging.Abstraction` | Интерфейсы и модели. Зависимостей от AWS SDK нет. |
 | `BrandUp.Extensions.Messaging.AmazonSqs` | Очереди через AWSSDK.SQS: Amazon SQS, Yandex Message Queue, ElasticMQ. |
 | `BrandUp.Extensions.Messaging.AmazonKinesis` | Стримы через AWSSDK.Kinesis: Amazon Kinesis, Yandex Data Streams. |
-| `BrandUp.Extensions.Messaging.MongoDB` | Хранилище позиций чтения стримов (чекпоинтов) в MongoDB. |
+| `BrandUp.Extensions.Messaging.MongoDB` | Хранилище позиций чтения стримов (чекпоинтов) и аренд шардов в MongoDB. |
 | `BrandUp.Extensions.Messaging.Testing` | Фейковая in-memory реализация для тестов. |
 
 ## Ключевые контракты
@@ -193,7 +193,7 @@ services.AddKinesisMessaging(options =>
 Стрим, в отличие от очереди, **не хранит позицию читателя** — её хранит сам читатель, иначе после рестарта он начнёт с начала. Позиция (sequence number последней обработанной записи) сохраняется через `ICheckpointStore` на каждую пару «шард + группа читателей»:
 
 ```csharp
-services.AddMongoCheckpoints();   // IMongoDatabase берётся из DI; или options.DatabaseAccessor
+services.AddMongoMessagingCheckpoints();   // IMongoDatabase берётся из DI; или options.DatabaseAccessor
 
 services.AddKinesisMessaging(options => { ... })
     .AddStream<OrderEvent>("order-events")
@@ -212,9 +212,36 @@ services.AddKinesisMessaging(options => { ... })
 - **Чекпоинт пишется после обработки** записи — семантика at-least-once, обработчик должен быть идемпотентным (как и на очередях).
 - **Ошибка обработчика** — запись повторяется на месте, шард ждёт (порядок важнее скорости). После `MaxDeliveryAttempts` (по умолчанию 5) запись логируется как critical и пропускается, чтобы одна «ядовитая» запись не остановила шард навсегда; `MaxDeliveryAttempts = 0` — повторять бесконечно.
 - **Решардинг** отслеживается: закрытый шард помечается завершённым, дочерние стартуют только после того, как родительский дочитан.
-- **Один читатель на шард.** Аренда шардов (leases) пока не реализована: запускайте один инстанс на группу читателей, либо задавайте каждому инстансу свою `ConsumerGroup`, если каждый должен видеть все записи.
+- **Один читатель на шард.** Без хранилища аренд (см. ниже) это соглашение, а не гарантия: запускайте один инстанс на группу читателей, либо задавайте каждому инстансу свою `ConsumerGroup`, если каждый должен видеть все записи.
 
-Хранилище чекпоинтов — одна маленькая запись на шард в коллекции `brandup.messaging.checkpoints` (`_id = stream|group|shard`), обновление одним upsert; имя коллекции меняется через `MongoCheckpointOptions.CollectionName`. В тестах доступен `services.AddInMemoryCheckpoints()` с инспектируемым `InMemoryCheckpointStore`.
+Хранилище чекпоинтов — одна маленькая запись на шард в коллекции `brandup.messaging.checkpoints` (`_id = stream|group|shard`), обновление одним upsert; имя коллекции меняется через `MongoCheckpointOptions.CollectionName`. В тестах доступен `services.AddInMemoryMessagingCheckpoints()` с инспектируемым `InMemoryCheckpointStore`.
+
+### Несколько инстансов на группу: аренда шардов
+
+Чтобы несколько инстансов одной группы читали стрим вместе, зарегистрируйте `IShardLeaseStore` — тогда каждый шард арендуется одним инстансом, а группа делит стрим между собой:
+
+```csharp
+services.AddMongoMessagingCheckpoints();
+services.AddMongoMessagingShardLeases();   // без этого группу должен читать один инстанс
+
+services.AddKinesisMessaging(options => { ... })
+    .AddConsumer<OrderEvent, OrderEventHandler>(options =>
+    {
+        options.ConsumerGroup      = "billing";
+        options.LeaseDuration      = TimeSpan.FromSeconds(30);   // сколько шард не читается после падения инстанса
+        options.LeaseRenewInterval = TimeSpan.FromSeconds(10);   // должен быть меньше LeaseDuration
+    });
+```
+
+Как это работает:
+
+- **Аренда берётся перед чтением** шарда и продлевается, пока он читается. Инстанс, который упал или потерял сеть, перестаёт продлевать — через `LeaseDuration` шард забирает другой и продолжает с чекпоинта. При штатной остановке аренда отдаётся сразу, ждать истечения не нужно.
+- **Доля от стрима** — шарды, делённые на число читателей, с округлением вверх: 5 шардов на 2 инстанса — 3 и 2. Сверх своей доли инстанс не берёт шарды, даже свободные.
+- **Передача шарда** запрашивается, только если свободных шардов не хватает: перегруженному читателю ставится отметка, он видит её на очередном продлении и отдаёт шард **после текущей записи** — работа не прерывается на середине. По одному шарду за раз, пока запрошенный не получен.
+- **Токен аренды** меняется при каждом взятии, поэтому подвисший читатель не может продлить или удалить аренду, которая уже перешла к другому.
+- Аренда **ограничивает дублирование, но не убирает его**: читатель, застрявший дольше `LeaseDuration`, потеряет шард, продолжая обрабатывать запись. Семантика остаётся at-least-once, обработчик должен быть идемпотентным.
+
+Аренды лежат в коллекции `brandup.messaging.leases` (`_id = stream|group|shard`, имя меняется через `MongoShardLeaseOptions.CollectionName`), запись удаляется, когда шард отдан. В тестах — `services.AddInMemoryMessagingShardLeases()` с инспектируемым `InMemoryShardLeaseStore`.
 
 ---
 
@@ -279,7 +306,6 @@ dotnet test
 
 ## Планы
 
-- Аренда шардов (leases), чтобы несколько инстансов одной группы читателей делили стрим между собой.
 - Стримы как свойства `MessagingContext` (сейчас контекст поддерживает только очереди).
 - Батчевая публикация (`SendMessageBatch` / `PutRecords`).
 - Кастомный провайдер учётных данных с автообновлением (аналог `IObjectStorageCredentialsProvider`); стандартная цепочка AWS SDK (IAM-роли) уже поддерживается.

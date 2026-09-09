@@ -11,8 +11,8 @@
     <Authors>Dmitry Kovyazin</Authors>
     <Company>BrandUp</Company>
     <Title>BrandUp.Extensions.Messaging.MongoDB</Title>
-    <Description>MongoDB checkpoint store for BrandUp.Extensions.Messaging stream readers: keeps the read position of every shard per consumer group, so a reader resumes where it stopped.</Description>
-    <PackageTags>messaging;stream;checkpoint;kinesis;datastreams;mongodb</PackageTags>
+    <Description>MongoDB checkpoint and shard lease stores for BrandUp.Extensions.Messaging stream readers: keeps the read position of every shard per consumer group, so a reader resumes where it stopped, and leases shards so several instances of one group can read a stream together.</Description>
+    <PackageTags>messaging;stream;checkpoint;lease;kinesis;datastreams;mongodb</PackageTags>
     <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.Messaging</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>

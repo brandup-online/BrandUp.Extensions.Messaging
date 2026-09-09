@@ -56,11 +56,17 @@ public class KinesisConsumerTests : IAsyncLifetime
         }
     }
 
-    IHost BuildReader(Handled handled, InMemoryCheckpointStore checkpoints, Action<KinesisConsumerOptions>? configure = null)
+    IHost BuildReader(
+        Handled handled,
+        InMemoryCheckpointStore checkpoints,
+        Action<KinesisConsumerOptions>? configure = null,
+        InMemoryShardLeaseStore? leases = null)
     {
         var builder = Host.CreateApplicationBuilder();
         builder.Services.AddSingleton(handled);
         builder.Services.AddSingleton<ICheckpointStore>(checkpoints);
+        if (leases is not null)
+            builder.Services.AddSingleton<IShardLeaseStore>(leases);
         builder.Services.AddKinesisMessaging(options =>
         {
             KinesisEnvironment.Apply(options);
@@ -205,6 +211,62 @@ public class KinesisConsumerTests : IAsyncLifetime
         {
             await host.StopAsync(TestContext.Current.CancellationToken);
         }
+    }
+
+    [KinesisFact]
+    public async Task Readers_OfOneGroup_LeaseTheShard_AndTakeOverWhenOneStops()
+    {
+        var checkpoints = new InMemoryCheckpointStore();
+        var leases = new InMemoryShardLeaseStore();
+        var first = new Handled();
+        var second = new Handled();
+
+        void ShortLeases(KinesisConsumerOptions options)
+        {
+            options.LeaseDuration = TimeSpan.FromSeconds(10);
+            options.LeaseRenewInterval = TimeSpan.FromSeconds(2);
+        }
+
+        using var firstHost = BuildReader(first, checkpoints, ShortLeases, leases);
+        using var secondHost = BuildReader(second, checkpoints, ShortLeases, leases);
+
+        await firstHost.StartAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            await WaitForAsync(() => leases.Leases.Count == 1, TimeSpan.FromSeconds(60));
+
+            // The second reader of the group finds the only shard leased and reads nothing, rather than
+            // delivering every record a second time.
+            await secondHost.StartAsync(TestContext.Current.CancellationToken);
+            await PublishAsync(firstHost, 1, 2);
+            await WaitForAsync(() => first.Numbers.Count >= 2, TimeSpan.FromSeconds(60));
+
+            Assert.Equal([1, 2], first.Numbers);
+            Assert.Empty(second.Numbers);
+            Assert.Single(leases.Leases);
+        }
+        finally
+        {
+            // Stopping releases the lease, so the shard is free at once instead of after it expires.
+            await firstHost.StopAsync(TestContext.Current.CancellationToken);
+        }
+
+        try
+        {
+            await WaitForAsync(() => leases.Leases.Count == 1, TimeSpan.FromSeconds(60));
+            await PublishAsync(secondHost, 3);
+            await WaitForAsync(() => second.Numbers.Count >= 1, TimeSpan.FromSeconds(60));
+
+            // Taken over at the checkpoint the first reader left: what it handled is not handled again.
+            Assert.Equal([3], second.Numbers);
+        }
+        finally
+        {
+            await secondHost.StopAsync(TestContext.Current.CancellationToken);
+        }
+
+        // Every lease is given back when the readers stop.
+        Assert.Empty(leases.Leases);
     }
 
     public class OrderEvent

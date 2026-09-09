@@ -20,9 +20,15 @@ namespace BrandUp.Extensions.Messaging.Internals;
 /// </para>
 /// <para>
 /// Splits and merges are followed: a closed shard is checkpointed as completed and its children start
-/// only once every parent is done. One reader per shard is assumed — running several instances in one
-/// consumer group would have them read the same shards and re-deliver records; use different groups,
-/// or a single instance, until shard leases are implemented.
+/// only once every parent is done.
+/// </para>
+/// <para>
+/// A shard is read by one instance. With an <see cref="IShardLeaseStore"/> registered that is enforced
+/// across instances: every shard is leased before it is read, the lease is renewed while it is being
+/// read, and the readers of a group divide the stream between them — a reader below its share takes
+/// free shards and then asks an overloaded reader to hand one over. Without a lease store nothing
+/// stops a second instance of the same group from reading the same shards, so run one instance per
+/// group, or give each its own <see cref="KinesisConsumerOptions.ConsumerGroup"/>.
 /// </para>
 /// </summary>
 internal sealed class KinesisConsumerService<TMessage>(
@@ -32,7 +38,8 @@ internal sealed class KinesisConsumerService<TMessage>(
     IMessageSerializer serializer,
     IServiceScopeFactory scopeFactory,
     IOptionsMonitor<KinesisConsumerOptions> optionsMonitor,
-    ILogger<KinesisConsumerService<TMessage>> logger) : BackgroundService
+    ILogger<KinesisConsumerService<TMessage>> logger,
+    IShardLeaseStore? leases = null) : BackgroundService
     where TMessage : class
 {
     // Only the discovery loop touches workers; completed is also written by the shard workers, which
@@ -40,12 +47,26 @@ internal sealed class KinesisConsumerService<TMessage>(
     readonly Dictionary<string, Task> workers = [];
     readonly ConcurrentDictionary<string, bool> completed = new(StringComparer.Ordinal);
 
+    // Identity of this reader in the lease store; set once the options are read.
+    string owner = "";
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Get runs the options validators, so a misconfigured reader fails host startup here.
         var options = optionsMonitor.Get(KinesisConsumerOptions.NameFor(typeof(TMessage)));
-        logger.LogInformation(
-            "Stream reader of {MessageType} started in group {ConsumerGroup}.", typeof(TMessage).Name, options.ConsumerGroup);
+
+        // Unique per instance, since that is what a lease is held by: two readers sharing an identity
+        // would renew each other's leases and read the same shard.
+        owner = options.ReaderId ?? $"{Environment.MachineName}/{Environment.ProcessId}/{Guid.NewGuid().ToString("N")[..6]}";
+
+        if (leases is null)
+            logger.LogInformation(
+                "Stream reader of {MessageType} started in group {ConsumerGroup}; no shard lease store is registered, so this must be the only reader of the group.",
+                typeof(TMessage).Name, options.ConsumerGroup);
+        else
+            logger.LogInformation(
+                "Stream reader of {MessageType} started in group {ConsumerGroup} as {Reader}, sharing the stream by shard leases.",
+                typeof(TMessage).Name, options.ConsumerGroup, owner);
 
         try
         {
@@ -91,10 +112,16 @@ internal sealed class KinesisConsumerService<TMessage>(
 
         var shards = await ListShardsAsync(stoppingToken);
         var present = shards.Select(s => s.ShardId).ToHashSet(StringComparer.Ordinal);
+        var plan = await PlanAsync(shards, options, stoppingToken);
 
         foreach (var shard in shards)
         {
             if (workers.ContainsKey(shard.ShardId) || completed.ContainsKey(shard.ShardId))
+                continue;
+
+            // Another reader of the group is on it: nothing here would succeed, and the checkpoint read
+            // it would take is one per foreign shard on every pass.
+            if (plan.LeasedByOthers.Contains(shard.ShardId))
                 continue;
 
             var checkpoint = await checkpoints.GetAsync(KeyOf(shard.ShardId, options), stoppingToken);
@@ -109,8 +136,47 @@ internal sealed class KinesisConsumerService<TMessage>(
             if (!await AreParentsDrainedAsync(shard, present, options, stoppingToken))
                 continue;
 
-            workers[shard.ShardId] = ReadShardAsync(shard.ShardId, checkpoint, options, stoppingToken);
+            ShardLease? lease = null;
+            if (leases is not null)
+            {
+                // Shards beyond this reader's share are left to the others, even when they are free.
+                if (workers.Count >= plan.MaxShards)
+                    continue;
+
+                lease = await leases.TryAcquireAsync(KeyOf(shard.ShardId, options), owner, options.LeaseDuration, stoppingToken);
+                if (lease is null)
+                    continue;   // another reader of the group holds the shard
+            }
+
+            workers[shard.ShardId] = ReadShardAsync(shard.ShardId, checkpoint, lease, options, stoppingToken);
         }
+
+        // Only after the free shards: a handover makes another reader stop, and costs a re-read of the
+        // record it was on, so it is worth asking for only when nothing free brings this reader up to
+        // its share.
+        if (plan.ShardToAskFor is { } handover && leases is not null && workers.Count < plan.MaxShards)
+        {
+            if (await leases.TryRequestHandoverAsync(handover, owner, stoppingToken))
+                logger.LogInformation(
+                    "Asked {Reader} to hand shard {ShardId} of stream {Stream} over.",
+                    handover.Owner, handover.Key.ShardId, StreamNameForLog());
+        }
+    }
+
+    /// <summary>
+    /// How many shards this reader may hold, and which lease to ask for when it holds fewer. Without a
+    /// lease store there is nothing to share and nobody to ask.
+    /// </summary>
+    async Task<BalancingPlan> PlanAsync(
+        IReadOnlyList<Shard> shards, KinesisConsumerOptions options, CancellationToken cancellationToken)
+    {
+        if (leases is null)
+            return new BalancingPlan(int.MaxValue, null, []);
+
+        var stored = await leases.ListAsync(stream.Name, options.ConsumerGroup, cancellationToken);
+        var inPlay = shards.Count(s => !completed.ContainsKey(s.ShardId));
+
+        return ShardBalancer.Plan(stored, owner, inPlay, workers.Count, DateTime.UtcNow);
     }
 
     async Task<bool> AreParentsDrainedAsync(
@@ -149,7 +215,8 @@ internal sealed class KinesisConsumerService<TMessage>(
         return false;
     }
 
-    async Task ReadShardAsync(string shardId, Checkpoint? checkpoint, KinesisConsumerOptions options, CancellationToken stoppingToken)
+    async Task ReadShardAsync(
+        string shardId, Checkpoint? checkpoint, ShardLease? lease, KinesisConsumerOptions options, CancellationToken stoppingToken)
     {
         var key = KeyOf(shardId, options);
         var position = checkpoint?.Position;
@@ -164,68 +231,159 @@ internal sealed class KinesisConsumerService<TMessage>(
         var startedAt = DateTime.UtcNow;
         string? iterator = null;
 
-        while (!stoppingToken.IsCancellationRequested)
+        // The lease as this worker last saw it, or null when it holds none - either because no lease
+        // store is registered, or because the shard has moved on to another reader.
+        var held = lease;
+        var renewAt = DateTime.UtcNow + options.LeaseRenewInterval;
+
+        try
         {
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                iterator ??= await GetIteratorAsync(shardId, position, startedAt, options, stoppingToken);
-
-                var response = await clientFactory.Get().GetRecordsAsync(
-                    new GetRecordsRequest { ShardIterator = iterator, Limit = options.BatchSize }, stoppingToken);
-
-                if (response.Records is { Count: > 0 } records)
+                try
                 {
-                    foreach (var record in records)
+                    if (!await KeepShardAsync())
+                        return;
+
+                    iterator ??= await GetIteratorAsync(shardId, position, startedAt, options, stoppingToken);
+
+                    var response = await clientFactory.Get().GetRecordsAsync(
+                        new GetRecordsRequest { ShardIterator = iterator, Limit = options.BatchSize }, stoppingToken);
+
+                    if (response.Records is { Count: > 0 } records)
                     {
-                        if (stoppingToken.IsCancellationRequested)
-                            return;
+                        foreach (var record in records)
+                        {
+                            if (stoppingToken.IsCancellationRequested)
+                                return;
 
-                        // Abandoned by shutdown rather than handled: the checkpoint must not move past
-                        // a record nobody processed, or it is lost instead of redelivered.
-                        if (!await HandleAsync(record, shardId, options, stoppingToken))
-                            return;
+                            // Abandoned by shutdown rather than handled: the checkpoint must not move past
+                            // a record nobody processed, or it is lost instead of redelivered.
+                            if (!await HandleAsync(record, shardId, options, stoppingToken))
+                                return;
 
-                        // Checkpoint per record: a crash then re-delivers one record, not a whole batch.
-                        // The store is a single upsert, and a stream read is far more expensive.
-                        position = record.SequenceNumber;
-                        await checkpoints.SetAsync(key, new Checkpoint(position), stoppingToken);
+                            // Checkpoint per record: a crash then re-delivers one record, not a whole batch.
+                            // The store is a single upsert, and a stream read is far more expensive.
+                            position = record.SequenceNumber;
+                            await checkpoints.SetAsync(key, new Checkpoint(position), stoppingToken);
+
+                            // Between records is where a handover is answered: the record just committed
+                            // is the last one this reader owes the shard.
+                            if (!await KeepShardAsync())
+                                return;
+                        }
+                    }
+
+                    iterator = response.NextShardIterator;
+
+                    if (iterator is null)
+                    {
+                        // The shard was closed by a split or merge and is now fully read.
+                        await checkpoints.SetAsync(key, new Checkpoint(position ?? "", Completed: true), stoppingToken);
+                        completed[shardId] = true;
+                        logger.LogInformation("Shard {ShardId} of stream {Stream} is closed and fully read.", shardId, StreamNameForLog());
+                        return;
+                    }
+
+                    if (response.Records is not { Count: > 0 })
+                    {
+                        // Nothing new: back off, or the 5-reads-per-second shard quota is spent on emptiness.
+                        if (!await DelayAsync(options.EmptyReadDelay, stoppingToken))
+                            return;
                     }
                 }
-
-                iterator = response.NextShardIterator;
-
-                if (iterator is null)
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
-                    // The shard was closed by a split or merge and is now fully read.
-                    await checkpoints.SetAsync(key, new Checkpoint(position ?? "", Completed: true), stoppingToken);
-                    completed[shardId] = true;
-                    logger.LogInformation("Shard {ShardId} of stream {Stream} is closed and fully read.", shardId, StreamNameForLog());
                     return;
                 }
-
-                if (response.Records is not { Count: > 0 })
+                catch (Exception ex)
                 {
-                    // Nothing new: back off, or the 5-reads-per-second shard quota is spent on emptiness.
-                    if (!await DelayAsync(options.EmptyReadDelay, stoppingToken))
+                    logger.LogError(ex,
+                        "Reading shard {ShardId} of stream {Stream} failed; retrying in {Delay}.",
+                        shardId, StreamNameForLog(), options.PollDelayOnError);
+
+                    // An expired iterator is the common case; re-acquire it from the last checkpoint.
+                    iterator = null;
+
+                    if (!await DelayAsync(options.PollDelayOnError, stoppingToken))
                         return;
                 }
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        }
+        finally
+        {
+            if (held is not null)
+                await ReleaseLeaseAsync(held, shardId);
+        }
+
+        // Keeps the lease alive and answers a handover. False when the shard is no longer this reader's:
+        // it stops there, and whatever it has not committed is re-read by whoever takes the shard.
+        async Task<bool> KeepShardAsync()
+        {
+            // No lease store: the shard is this reader's for as long as it reads it.
+            if (held is null || DateTime.UtcNow < renewAt)
+                return true;
+
+            ShardLease? renewed;
+            try
             {
-                return;
+                renewed = await leases!.TryRenewAsync(held, options.LeaseDuration, stoppingToken);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                // A failed write is not a lost shard: the lease stands until it actually runs out, and
+                // the next iteration tries again. Past that point another reader may take over, so
+                // reading on would double-handle records.
+                if (DateTime.UtcNow < held.ExpiresAt)
+                {
+                    logger.LogWarning(ex,
+                        "Renewing the lease on shard {ShardId} of stream {Stream} failed; retrying.", shardId, StreamNameForLog());
+                    return true;
+                }
+
                 logger.LogError(ex,
-                    "Reading shard {ShardId} of stream {Stream} failed; retrying in {Delay}.",
-                    shardId, StreamNameForLog(), options.PollDelayOnError);
-
-                // An expired iterator is the common case; re-acquire it from the last checkpoint.
-                iterator = null;
-
-                if (!await DelayAsync(options.PollDelayOnError, stoppingToken))
-                    return;
+                    "The lease on shard {ShardId} of stream {Stream} expired and could not be renewed; the shard is given up.",
+                    shardId, StreamNameForLog());
+                return false;
             }
+
+            if (renewed is null)
+            {
+                // Taken over after the lease expired - releasing it now would delete another reader's lease.
+                logger.LogWarning(
+                    "The lease on shard {ShardId} of stream {Stream} is no longer held by {Reader}; the shard is given up.",
+                    shardId, StreamNameForLog(), owner);
+                held = null;
+                return false;
+            }
+
+            held = renewed;
+            renewAt = DateTime.UtcNow + options.LeaseRenewInterval;
+
+            if (renewed.HandoverTo is { } requester && !string.Equals(requester, owner, StringComparison.Ordinal))
+            {
+                logger.LogInformation(
+                    "Handing shard {ShardId} of stream {Stream} over to {Reader}.", shardId, StreamNameForLog(), requester);
+                return false;   // the lease is released in the finally, so the shard is free at once
+            }
+
+            return true;
+        }
+    }
+
+    async Task ReleaseLeaseAsync(ShardLease lease, string shardId)
+    {
+        try
+        {
+            // Shutdown has already cancelled this worker's token, and the release still has to reach the
+            // store - otherwise the shard sits out the whole lease before another instance may take it.
+            await leases!.ReleaseAsync(lease, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Releasing the lease on shard {ShardId} of stream {Stream} failed; it expires on its own.",
+                shardId, StreamNameForLog());
         }
     }
 

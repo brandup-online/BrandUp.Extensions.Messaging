@@ -95,7 +95,7 @@ public class StreamRegistrationTests
     public void AddConsumer_WithCheckpointStore_RegistersReader()
     {
         var services = CreateServices();
-        services.AddInMemoryCheckpoints();
+        services.AddInMemoryMessagingCheckpoints();
         services.AddKinesisMessaging(_ => { }, validateOnStart: false)
             .AddStream<OrderEvent>()
             .AddConsumer<OrderEvent, OrderEventHandler>(options => options.ConsumerGroup = "billing");
@@ -111,7 +111,7 @@ public class StreamRegistrationTests
     public void AddConsumer_SameTypeTwice_Throws()
     {
         var services = CreateServices();
-        services.AddInMemoryCheckpoints();
+        services.AddInMemoryMessagingCheckpoints();
         var builder = services.AddKinesisMessaging(_ => { }, validateOnStart: false)
             .AddStream<OrderEvent>()
             .AddConsumer<OrderEvent, OrderEventHandler>();
@@ -125,7 +125,7 @@ public class StreamRegistrationTests
     public void ConsumerOptions_InvalidBatchSize_FailValidation(int batchSize)
     {
         var services = CreateServices();
-        services.AddInMemoryCheckpoints();
+        services.AddInMemoryMessagingCheckpoints();
         services.AddKinesisMessaging(_ => { }, validateOnStart: false)
             .AddStream<OrderEvent>()
             .AddConsumer<OrderEvent, OrderEventHandler>(options => options.BatchSize = batchSize);
@@ -137,11 +137,11 @@ public class StreamRegistrationTests
     }
 
     [Fact]
-    public void AddInMemoryCheckpoints_RepeatedCalls_ShareOneStore()
+    public void AddInMemoryMessagingCheckpoints_RepeatedCalls_ShareOneStore()
     {
         var services = new ServiceCollection();
-        services.AddInMemoryCheckpoints();
-        services.AddInMemoryCheckpoints();
+        services.AddInMemoryMessagingCheckpoints();
+        services.AddInMemoryMessagingCheckpoints();
 
         using var provider = services.BuildServiceProvider();
 

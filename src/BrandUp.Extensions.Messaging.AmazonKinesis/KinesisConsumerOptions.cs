@@ -50,6 +50,32 @@ public class KinesisConsumerOptions
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <summary>
+    /// How long a shard lease is valid without renewal — how long the shards of a reader that died or
+    /// lost the network stay unread before another instance picks them up. Only used when an
+    /// <see cref="IShardLeaseStore"/> is registered. Defaults to 30 seconds.
+    /// <para>
+    /// A lease is renewed between records, so keep it longer than <see cref="MaxDeliveryAttempts"/> ×
+    /// <see cref="RetryDelay"/>: a record being retried holds its shard for that long, and a shorter
+    /// lease would have the shard taken over while the record is still in the handler.
+    /// </para>
+    /// </summary>
+    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How often the reader extends the leases it holds. Must be shorter than
+    /// <see cref="LeaseDuration"/> — with room for a retry, or a single slow write costs the shard.
+    /// Defaults to 10 seconds.
+    /// </summary>
+    public TimeSpan LeaseRenewInterval { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Identity of this reader — the <see cref="ShardLease.Owner"/> of every shard it leases. Defaults
+    /// to machine, process and a random suffix: unique per instance, which is what leases rely on. Set
+    /// it only to something equally unique (a pod name, say) that reads better in diagnostics.
+    /// </summary>
+    public string? ReaderId { get; set; }
+
+    /// <summary>
     /// The options-monitor name of the reader bound to <paramref name="messageType"/> — the contract
     /// between registration, the hosted service and configuration binding.
     /// </summary>
@@ -88,6 +114,15 @@ internal class KinesisConsumerOptionsValidator : IValidateOptions<KinesisConsume
             return ValidateOptionsResult.Fail($"{nameof(KinesisConsumerOptions.MaxDeliveryAttempts)}{consumer} must not be negative (0 retries indefinitely).");
         if (options.RetryDelay < TimeSpan.Zero)
             return ValidateOptionsResult.Fail($"{nameof(KinesisConsumerOptions.RetryDelay)}{consumer} must not be negative.");
+        if (options.LeaseDuration <= TimeSpan.Zero)
+            return ValidateOptionsResult.Fail($"{nameof(KinesisConsumerOptions.LeaseDuration)}{consumer} must be positive.");
+        if (options.LeaseRenewInterval <= TimeSpan.Zero)
+            return ValidateOptionsResult.Fail($"{nameof(KinesisConsumerOptions.LeaseRenewInterval)}{consumer} must be positive.");
+        if (options.LeaseRenewInterval >= options.LeaseDuration)
+            return ValidateOptionsResult.Fail(
+                $"{nameof(KinesisConsumerOptions.LeaseRenewInterval)}{consumer} must be shorter than {nameof(KinesisConsumerOptions.LeaseDuration)}, or a lease expires while it is being renewed.");
+        if (options.ReaderId is not null && string.IsNullOrWhiteSpace(options.ReaderId))
+            return ValidateOptionsResult.Fail($"{nameof(KinesisConsumerOptions.ReaderId)}{consumer} must not be empty.");
 
         return ValidateOptionsResult.Success;
     }
