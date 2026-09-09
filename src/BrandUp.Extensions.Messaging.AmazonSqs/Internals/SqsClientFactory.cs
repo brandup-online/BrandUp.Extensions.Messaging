@@ -14,12 +14,16 @@ internal sealed class SqsClientFactory(
     IServiceProvider services,
     IEnumerable<MessagingCredentialsRegistration> credentials) : ISqsClientFactory, IDisposable
 {
-    readonly System.Collections.Concurrent.ConcurrentDictionary<string, IAmazonSQS> clients = new(StringComparer.Ordinal);
+    // Lazy, because GetOrAdd may run its factory more than once under contention and a discarded
+    // AmazonSQSClient would leak its connection pool.
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<IAmazonSQS>> clients = new(StringComparer.Ordinal);
 
     public IAmazonSQS Get(string connectionName)
         => clients.GetOrAdd(
             connectionName,
-            name => Create(options.Get(name), CredentialsRegistrations.Resolve(services, credentials, name)));
+            name => new Lazy<IAmazonSQS>(
+                () => Create(options.Get(name), CredentialsRegistrations.Resolve(services, credentials, name)),
+                LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 
     static IAmazonSQS Create(SqsMessagingOptions options, IMessagingCredentialsProvider? provider)
     {
@@ -35,7 +39,11 @@ internal sealed class SqsClientFactory(
     public void Dispose()
     {
         foreach (var client in clients.Values)
-            client.Dispose();
+        {
+            if (client.IsValueCreated)
+                client.Value.Dispose();
+        }
+
         clients.Clear();
     }
 }

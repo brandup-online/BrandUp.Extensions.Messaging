@@ -16,10 +16,10 @@ internal static class FakePublications
     /// have no meaning here, but the order matters: production rejects a batch holding a bad message
     /// before anything goes out, and a fake that published the first half would hide that.
     /// </summary>
-    /// <param name="validate">
-    /// Checks one message the way a single publish does; it is given the parameter name to blame, so an
-    /// error points at the position in the batch.
-    /// </param>
+    /// <remarks>
+    /// <paramref name="validate"/> checks one message the way a single publish does; it is given the
+    /// parameter name to blame, so an error points at the position in the batch.
+    /// </remarks>
     public static async Task<IReadOnlyList<PublishResult>> PublishEachAsync<TMessage>(
         IReadOnlyCollection<PublishMessage<TMessage>> messages,
         Action<PublishMessage<TMessage>, string> validate,

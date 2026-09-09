@@ -18,8 +18,11 @@
 - `IMessageQueue<TMessage>` — типизированная очередь: publish / receive / delete / abandon, семантика point-to-point с visibility timeout.
 - `IMessageStream<TMessage>` — типизированный стрим: публикация с partition key (порядок в рамках группы).
 - `IMessageHandler<TMessage>` — обработчик, вызывается hosted-консьюмером в своём DI-scope; успех — сообщение удаляется, исключение — сообщение вернётся и в итоге уедет в dead-letter.
-- `MessagingContext` — типизированный контекст: набор очередей свойствами, привязанный к одному подключению; `EnsureQueuesAsync()` для провижининга.
+- `MessagingContext` — типизированный контекст: очереди и стримы свойствами; `EnsureQueuesAsync()` для провижининга очередей.
 - `IMessageSerializer` — сериализация; по умолчанию JSON (camelCase).
+- `ICheckpointStore` — позиция чтения стрима (шард + группа читателей); без него читатель начинал бы с начала после каждого рестарта.
+- `IShardLeaseStore` — аренда шардов: несколько инстансов одной группы читателей делят стрим между собой.
+- `IMessagingCredentialsProvider` — учётные данные, которые меняются со временем (STS, vault); библиотека держит их кеш тёплым.
 
 ---
 
@@ -210,7 +213,9 @@ public class Provisioning(OrderMessaging messaging)
 
 В тестах тот же тип контекста поднимается поверх in-memory шины одним вызовом: `services.AddFakeMessaging<OrderMessaging>()` — заполняются и очереди, и стримы, `EnsureQueuesAsync` — no-op.
 
-### Учётные данные
+---
+
+## Учётные данные
 
 По умолчанию используются либо статические ключи из опций, либо стандартная цепочка AWS SDK (IAM-роль, переменные окружения, профиль), если ключи не заданы. Когда креды временные — STS, обмен токена на ключи, выдача из vault — регистрируется провайдер:
 
@@ -330,6 +335,7 @@ services.AddKinesisMessaging(options => { ... })
 ```csharp
 services.AddFakeMessaging()
     .AddQueue<OrderCreated>()
+    .AddStream<OrderEvent>()                       // стримы подменяются так же, как очереди
     .AddHandler<OrderCreated, OrderCreatedHandler>();
 
 var bus = provider.GetRequiredService<InMemoryMessageBus>();
@@ -338,9 +344,11 @@ var bus = provider.GetRequiredService<InMemoryMessageBus>();
 await orderService.CreatedAsync(order);
 var published = Assert.Single(bus.PublishedOf<OrderCreated>());
 
-// Доставка в обработчики — как это сделал бы hosted-консьюмер
+// Доставка в обработчики — как это сделал бы hosted-консьюмер или ридер стрима
 await bus.DispatchPendingAsync(provider);
 ```
+
+Контекст любого состава поднимается одним вызовом `services.AddFakeMessaging<OrderMessaging>()` — заполняются и очереди, и стримы. Для чтения стримов есть `services.AddInMemoryMessagingCheckpoints()` и `services.AddInMemoryMessagingShardLeases()` с инспектируемыми `InMemoryCheckpointStore` и `InMemoryShardLeaseStore`.
 
 ---
 
@@ -353,7 +361,7 @@ IMessagePublisher (фасад, роутинг по типу сообщения)
         │                             └─ IMessageStream<TMessage>  (AmazonKinesis)
         │
 IMessageHandler<TMessage> ◄─┬─ SqsConsumerService<TMessage>      (long polling, батч-удаление)
-                            └─ KinesisConsumerService<TMessage>  (шарды + ICheckpointStore)
+                            └─ KinesisConsumerService<TMessage>  (шарды + ICheckpointStore + IShardLeaseStore)
 ```
 
 - Разрешение имён: переопределение из options — точное физическое имя; без него — `префикс + логическое имя + суффикс`; для FIFO добавляется `.fifo`. Лимиты SQS (80 символов, алфавит) проверяются при разрешении.
