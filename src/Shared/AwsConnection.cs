@@ -54,16 +54,54 @@ internal static class AwsConnection
     }
 
     /// <summary>
-    /// Static credentials from the options, or <see langword="null"/> when no keys are set — construct
-    /// the client without credentials then, so the SDK default credential chain applies.
+    /// Credentials of a connection, in order: a registered provider (renewed in place), then static keys
+    /// from the options, then <see langword="null"/> — construct the client without credentials, so the
+    /// SDK default credential chain applies (IAM role, environment, profile).
     /// </summary>
-    public static AWSCredentials? CreateCredentials(IAwsConnectionOptions options)
+    public static AWSCredentials? CreateCredentials(IAwsConnectionOptions options, IMessagingCredentialsProvider? provider = null)
     {
+        if (provider is not null)
+            return new ProviderCredentials(provider);
+
         if (string.IsNullOrEmpty(options.AccessKeyId))
             return null;
 
         return string.IsNullOrEmpty(options.SessionToken)
             ? new BasicAWSCredentials(options.AccessKeyId, options.SecretAccessKey)
             : new SessionAWSCredentials(options.AccessKeyId, options.SecretAccessKey, options.SessionToken);
+    }
+
+    /// <summary>
+    /// Feeds an <see cref="IMessagingCredentialsProvider"/> to the SDK. The SDK re-reads the provider
+    /// once the credentials it was given expire, which is what lets one client outlive many rotations:
+    /// the client is never rebuilt, only its credentials are. The read is synchronous — the provider
+    /// serves its cache, and the refresher behind it keeps that cache warm.
+    /// </summary>
+    sealed class ProviderCredentials(IMessagingCredentialsProvider provider) : RefreshingAWSCredentials
+    {
+        protected override CredentialsRefreshState GenerateNewCredentials()
+        {
+            var credentials = provider.GetCurrent()
+                ?? throw new MessagingException($"{provider.GetType().Name} returned no credentials.");
+
+            if (string.IsNullOrEmpty(credentials.AccessKeyId) || string.IsNullOrEmpty(credentials.SecretAccessKey))
+                throw new MessagingException(
+                    $"{provider.GetType().Name} returned credentials without an access key. " +
+                    "A provider must serve what its last refresh produced; check that RefreshAsync ran before the first publish.");
+
+            // Expired credentials would be refused by the SDK with an error about its own refresh cycle,
+            // which says nothing about what to fix. The cache went stale: either RefreshAsync is failing
+            // (it is logged), or it renews too late for the lifetime the provider hands out.
+            if (credentials.ExpiresUtc is { } expiresUtc && expiresUtc <= DateTimeOffset.UtcNow)
+                throw new MessagingException(
+                    $"{provider.GetType().Name} returned credentials that expired at {expiresUtc:u}. " +
+                    "Renew them in RefreshAsync before they expire, or hand out a longer lifetime.");
+
+            // Credentials without an expiry are re-read hourly rather than never: a provider that rotates
+            // silently then still takes effect, and an hour of caching costs nothing.
+            return new CredentialsRefreshState(
+                new ImmutableCredentials(credentials.AccessKeyId, credentials.SecretAccessKey, credentials.SessionToken),
+                (credentials.ExpiresUtc ?? DateTimeOffset.UtcNow.AddHours(1)).UtcDateTime);
+        }
     }
 }

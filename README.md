@@ -210,6 +210,40 @@ public class Provisioning(OrderMessaging messaging)
 
 В тестах тот же тип контекста поднимается поверх in-memory шины одним вызовом: `services.AddFakeMessaging<OrderMessaging>()` — заполняются и очереди, и стримы, `EnsureQueuesAsync` — no-op.
 
+### Учётные данные
+
+По умолчанию используются либо статические ключи из опций, либо стандартная цепочка AWS SDK (IAM-роль, переменные окружения, профиль), если ключи не заданы. Когда креды временные — STS, обмен токена на ключи, выдача из vault — регистрируется провайдер:
+
+```csharp
+public class StsCredentialsProvider : IMessagingCredentialsProvider
+{
+    MessagingCredentials current = ...;
+
+    // Читается SDK синхронно при подписи запроса — только отдать кеш, без сетевых вызовов
+    public MessagingCredentials GetCurrent() => current;
+
+    // Вызывается библиотекой на старте и по таймеру; обновлять, только если пора
+    public async Task RefreshAsync(CancellationToken cancellationToken = default) { ... }
+}
+
+services.AddSqsMessaging(options => { ... })
+    .UseCredentialsProvider<StsCredentialsProvider>();          // или .UseCredentialsProvider(sp => ...)
+
+services.AddSqsMessagingConnection("archive", options => { ... })
+    .UseCredentialsProvider<ArchiveCredentialsProvider>();      // креды принадлежат подключению
+
+services.AddKinesisMessaging(options => { ... })
+    .UseCredentialsProvider<StsCredentialsProvider>();
+```
+
+Как это работает:
+
+- **Провайдер важнее статических ключей** того же подключения; один провайдер на подключение, повторная регистрация — ошибка.
+- **Кеш держится тёплым**: hosted-сервис вызывает `RefreshAsync` на старте (провайдер «прогревается» до первой публикации) и дальше раз в минуту — интервал задаётся вторым параметром `UseCredentialsProvider`. Провайдер сам решает, пора ли обновлять, поэтому это heartbeat, а не период ротации.
+- **Ошибка обновления не роняет хост**: она логируется, а следующая попытка идёт по расписанию — имеющиеся креды могут быть ещё действительны.
+- **Ротация подхватывается без пересоздания клиента**: SDK перечитывает провайдера, когда истекает `ExpiresUtc` (без него — раз в час).
+- **Просроченные креды из кеша** приводят к понятной ошибке с именем провайдера, а не к сообщению SDK про его внутренний цикл обновления.
+
 ---
 
 ## Стримы (Kinesis / Yandex Data Streams)
@@ -350,5 +384,4 @@ dotnet test
 
 ## Планы
 
-- Кастомный провайдер учётных данных с автообновлением (аналог `IObjectStorageCredentialsProvider`); стандартная цепочка AWS SDK (IAM-роли) уже поддерживается.
 - Мост с outbox из BrandUp.Core: публикация доменных событий через `IMessagePublisher`.

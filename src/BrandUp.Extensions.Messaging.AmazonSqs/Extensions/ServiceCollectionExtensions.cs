@@ -36,7 +36,7 @@ public static class SqsMessagingServiceCollectionExtensions
     /// sharing a name share one SQS client.
     /// </summary>
     /// <inheritdoc cref="AddSqsMessaging(IServiceCollection, Action{SqsMessagingOptions}, bool)" path="/param[@name='validateOnStart']"/>
-    public static IServiceCollection AddSqsMessagingConnection(
+    public static SqsMessagingConnectionBuilder AddSqsMessagingConnection(
         this IServiceCollection services, string name, Action<SqsMessagingOptions> configure, bool validateOnStart = true)
     {
         ArgumentNullException.ThrowIfNull(services);
@@ -45,7 +45,7 @@ public static class SqsMessagingServiceCollectionExtensions
 
         AddConnectionCore(services, name, configure, validateOnStart);
 
-        return services;
+        return new SqsMessagingConnectionBuilder(services, name);
     }
 
     /// <summary>

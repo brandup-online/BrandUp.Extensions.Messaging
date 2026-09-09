@@ -14,6 +14,33 @@ public class KinesisMessagingBuilder
     public IServiceCollection Services { get; }
 
     /// <summary>
+    /// Takes the credentials of this connection from <typeparamref name="TProvider"/> instead of static
+    /// keys: the provider is asked to renew them on a timer, and the client picks up what it caches
+    /// without being rebuilt. What a provider is for — temporary (STS) credentials, a vault, a token
+    /// exchanged for keys — see <see cref="IMessagingCredentialsProvider"/>.
+    /// </summary>
+    /// <param name="refreshInterval">
+    /// How often the provider is asked to renew; one minute by default. The provider renews only what
+    /// needs renewing, so this is a heartbeat rather than a rotation period.
+    /// </param>
+    public KinesisMessagingBuilder UseCredentialsProvider<TProvider>(TimeSpan? refreshInterval = null)
+        where TProvider : class, IMessagingCredentialsProvider
+    {
+        CredentialsRegistrations.Add<TProvider>(Services, Options.DefaultName, refreshInterval, nameof(UseCredentialsProvider));
+
+        return this;
+    }
+
+    /// <inheritdoc cref="UseCredentialsProvider{TProvider}(TimeSpan?)"/>
+    public KinesisMessagingBuilder UseCredentialsProvider(
+        Func<IServiceProvider, IMessagingCredentialsProvider> factory, TimeSpan? refreshInterval = null)
+    {
+        CredentialsRegistrations.Add(Services, Options.DefaultName, refreshInterval, factory, nameof(UseCredentialsProvider));
+
+        return this;
+    }
+
+    /// <summary>
     /// Binds a message type to a stream. The logical name comes from <paramref name="streamName"/> or
     /// the type's <see cref="QueueAttribute"/>; the physical name (for Yandex Data Streams — the full
     /// stream path) is resolved via <see cref="KinesisMessagingOptions.Streams"/>. Registers
