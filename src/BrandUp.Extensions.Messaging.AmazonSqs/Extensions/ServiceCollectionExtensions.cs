@@ -49,9 +49,14 @@ public static class SqsMessagingServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Registers a messaging context on its own connection, configured here. The connection is private
-    /// to the context; to share one account between contexts use
+    /// Registers the queues of a messaging context on its own connection, configured here. The
+    /// connection is private to the context; to share one account between contexts use
     /// <see cref="AddSqsMessagingConnection(IServiceCollection, string, Action{SqsMessagingOptions}, bool)"/>.
+    /// <para>
+    /// A context that also declares <see cref="IMessageStream{TMessage}"/> properties is registered with
+    /// the stream transport as well — <c>AddKinesisMessaging&lt;TContext&gt;(…)</c> — and each fills the
+    /// properties it serves.
+    /// </para>
     /// </summary>
     public static SqsMessagingContextBuilder<TContext> AddSqsMessaging<TContext>(
         this IServiceCollection services, Action<SqsMessagingOptions> configure, bool validateOnStart = true)
@@ -66,7 +71,7 @@ public static class SqsMessagingServiceCollectionExtensions
         return services.AddSqsMessaging<TContext>(connectionName);
     }
 
-    /// <summary>Registers a messaging context on an existing named connection.</summary>
+    /// <summary>Registers the queues of a messaging context on an existing named connection.</summary>
     public static SqsMessagingContextBuilder<TContext> AddSqsMessaging<TContext>(
         this IServiceCollection services, string connectionName)
         where TContext : MessagingContext
@@ -78,31 +83,23 @@ public static class SqsMessagingServiceCollectionExtensions
         var registry = GetOrAddRegistry(services);
         var contextType = typeof(TContext);
         var model = MessagingModel.Build(contextType);      // property scan + validation at registration
+        var method = $"AddSqsMessaging<{contextType.Name}>";
+
+        // Only the queues: streams of the same context are bound by the stream transport.
+        var queues = MessagingContexts.PropertiesFor(model, MessagingPropertyKind.Queue, method);
 
         // Guard the whole context before registering any of it: a failure halfway through would leave
         // earlier queues bound with no context to serve them.
-        foreach (var property in model.Properties)
-            RegistrationGuards.EnsureNotBound(services, property.MessageType, $"AddSqsMessaging<{contextType.Name}>");
+        foreach (var property in queues)
+            RegistrationGuards.EnsureNotBound(services, property.MessageType, method);
 
-        foreach (var property in model.Properties)
+        foreach (var property in queues)
             AddQueueCore(services, registry, property.MessageType, connectionName, property.LogicalName, new QueueSettings());
 
-        services.AddSingleton(sp =>
-        {
-            if (!registry.HasConnection(connectionName))
-                throw new InvalidOperationException(
-                    $"Connection '{connectionName}' required by messaging context {contextType.FullName} is not registered. " +
-                    $"Call AddSqsMessagingConnection(\"{connectionName}\", …) or AddSqsMessaging<{contextType.Name}>(configure).");
-
-            var provider = sp.GetRequiredService<ISqsQueueProvider>();
-            var context = ActivatorUtilities.CreateInstance<TContext>(sp);
-            context.Initialize(
-                model,
-                messageType => (IMessageQueue)sp.GetRequiredService(typeof(IMessageQueue<>).MakeGenericType(messageType)),
-                provider.EnsureQueueAsync);
-
-            return context;
-        });
+        // The connection may be registered after the context, so this is checked when the context is
+        // built rather than here.
+        services.AddSingleton<IMessagingContextCheck>(new SqsConnectionCheck(contextType, connectionName, registry));
+        MessagingContexts.EnsureRegistered(services, contextType, model);
 
         return new SqsMessagingContextBuilder<TContext>(services, registry, model);
     }
@@ -137,6 +134,8 @@ public static class SqsMessagingServiceCollectionExtensions
         services.TryAddSingleton<IMessageSerializer, JsonMessageSerializer>();
         services.TryAddSingleton<ISqsClientFactory, SqsClientFactory>();
         services.TryAddSingleton<ISqsQueueProvider, SqsQueueProvider>();
+        // How a messaging context provisions its queues without knowing the transport.
+        services.TryAddSingleton<IQueueProvisioner>(sp => sp.GetRequiredService<ISqsQueueProvider>());
         services.TryAddSingleton<IMessagePublisher, ServiceProviderMessagePublisher>();
     }
 

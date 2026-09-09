@@ -39,4 +39,45 @@ public static class KinesisMessagingServiceCollectionExtensions
 
         return new KinesisMessagingBuilder(services);
     }
+
+    /// <summary>
+    /// Registers a messaging context on a Kinesis-compatible connection configured here: its
+    /// <see cref="IMessageStream{TMessage}"/> properties are bound to streams, by the same naming rules
+    /// as <see cref="KinesisMessagingBuilder.AddStream{TMessage}"/>. A context that also declares
+    /// queues is registered with the queue transport as well — each fills the properties it serves.
+    /// </summary>
+    /// <inheritdoc cref="AddKinesisMessaging(IServiceCollection, Action{KinesisMessagingOptions}, bool)" path="/param[@name='validateOnStart']"/>
+    public static KinesisMessagingContextBuilder<TContext> AddKinesisMessaging<TContext>(
+        this IServiceCollection services, Action<KinesisMessagingOptions> configure, bool validateOnStart = true)
+        where TContext : MessagingContext
+        => services.AddKinesisMessaging(configure, validateOnStart).AddContext<TContext>();
+
+    /// <summary>Consumer registration shared by the connection and context builders.</summary>
+    internal static void AddConsumerCore<TMessage, THandler>(
+        IServiceCollection services, Action<KinesisConsumerOptions>? configure)
+        where TMessage : class
+        where THandler : class, IMessageHandler<TMessage>
+    {
+        RegistrationGuards.EnsureNoHandler<TMessage>(services, "AddConsumer");
+
+        services.AddScoped<IMessageHandler<TMessage>, THandler>();
+        if (configure is not null)
+            services.Configure(KinesisConsumerOptions.NameFor(typeof(TMessage)), configure);
+
+        services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp =>
+        {
+            var checkpoints = sp.GetService<ICheckpointStore>()
+                ?? throw new InvalidOperationException(
+                    $"Reading stream {typeof(TMessage).Name} needs an {nameof(ICheckpointStore)}: register one " +
+                    "(AddMongoMessagingCheckpoints in production, AddInMemoryMessagingCheckpoints in tests) before AddConsumer, " +
+                    "or the reader would re-read the stream from the start after every restart.");
+
+            // Optional: without a lease store the reader assumes it is the only one of its group.
+            var leases = sp.GetService<IShardLeaseStore>();
+
+            return leases is null
+                ? ActivatorUtilities.CreateInstance<KinesisConsumerService<TMessage>>(sp, checkpoints)
+                : ActivatorUtilities.CreateInstance<KinesisConsumerService<TMessage>>(sp, checkpoints, leases);
+        });
+    }
 }

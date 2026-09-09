@@ -11,15 +11,15 @@ public class MessagingModelTests
 
         Assert.Equal(3, model.Properties.Count);
         // Property attribute wins over the message type's one.
-        Assert.Equal("overridden", model.RequireProperty(typeof(AttributedMessage)).LogicalName);
+        Assert.Equal("overridden", model.RequireProperty(typeof(AttributedMessage), MessagingPropertyKind.Queue).LogicalName);
         // Message type attribute.
-        Assert.Equal("typed-message", model.RequireProperty(typeof(TypedMessage)).LogicalName);
+        Assert.Equal("typed-message", model.RequireProperty(typeof(TypedMessage), MessagingPropertyKind.Queue).LogicalName);
         // Property name fallback.
-        Assert.Equal("Plain", model.RequireProperty(typeof(PlainMessage)).LogicalName);
+        Assert.Equal("Plain", model.RequireProperty(typeof(PlainMessage), MessagingPropertyKind.Queue).LogicalName);
     }
 
     [Fact]
-    public void Build_WithoutQueues_Throws()
+    public void Build_WithoutDestinations_Throws()
     {
         Assert.Throws<InvalidOperationException>(() => MessagingModel.Build(typeof(EmptyContext)));
     }
@@ -37,9 +37,33 @@ public class MessagingModelTests
     }
 
     [Fact]
-    public void Build_StreamProperty_NotSupportedYet()
+    public void Build_SplitsQueuesAndStreams()
     {
-        Assert.Throws<NotSupportedException>(() => MessagingModel.Build(typeof(StreamContext)));
+        var model = MessagingModel.Build(typeof(MixedContext));
+
+        // Each transport binds its own half, so the split is what the registrations work from.
+        Assert.Equal("Plain", Assert.Single(model.Queues).LogicalName);
+        Assert.Equal("typed-message", Assert.Single(model.Streams).LogicalName);
+    }
+
+    [Fact]
+    public void RequireProperty_OfTheOtherKind_Throws()
+    {
+        var model = MessagingModel.Build(typeof(MixedContext));
+
+        // A stream of the context is not a queue of it: configuring it as one is a registration error.
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => model.RequireProperty(typeof(TypedMessage), MessagingPropertyKind.Queue));
+        Assert.Contains("has no queue", exception.Message);
+
+        Assert.NotNull(model.RequireProperty(typeof(TypedMessage), MessagingPropertyKind.Stream));
+    }
+
+    [Fact]
+    public void Build_MessageTypeAsQueueAndStream_Throws()
+    {
+        // One message type, one destination — mapping it twice is ambiguous even across kinds.
+        Assert.Throws<InvalidOperationException>(() => MessagingModel.Build(typeof(QueueAndStreamContext)));
     }
 
     [Queue("typed-message")]
@@ -70,8 +94,15 @@ public class MessagingModelTests
         public IMessageQueue<PlainMessage> Plain => null!;
     }
 
-    public class StreamContext : MessagingContext
+    public class MixedContext : MessagingContext
     {
-        public IMessageStream<PlainMessage> Plain { get; private set; } = null!;
+        public IMessageQueue<PlainMessage> Plain { get; private set; } = null!;
+        public IMessageStream<TypedMessage> Typed { get; private set; } = null!;
+    }
+
+    public class QueueAndStreamContext : MessagingContext
+    {
+        public IMessageQueue<PlainMessage> Queue { get; private set; } = null!;
+        public IMessageStream<PlainMessage> Stream { get; private set; } = null!;
     }
 }

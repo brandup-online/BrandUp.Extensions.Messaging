@@ -32,15 +32,17 @@ public static class FakeMessagingServiceCollectionExtensions
 
         services.TryAddSingleton<IMessageSerializer, JsonMessageSerializer>();
         services.TryAddSingleton<IMessagePublisher, ServiceProviderMessagePublisher>();
+        // EnsureQueuesAsync is a no-op on the fake: a fake queue always exists.
+        services.TryAddSingleton<IQueueProvisioner, FakeQueueProvisioner>();
 
         return new FakeMessagingBuilder(services, bus);
     }
 
     /// <summary>
     /// Registers a messaging context backed by the in-memory bus: the same context type as in
-    /// production, its queues resolved by the same naming rules. Unlike a real connection, the logical
-    /// name is the physical one — in tests a name is just a label. <c>EnsureQueuesAsync</c> is a no-op:
-    /// fake queues always exist.
+    /// production, its queues and streams resolved by the same naming rules. Unlike a real connection,
+    /// the logical name is the physical one — in tests a name is just a label. <c>EnsureQueuesAsync</c>
+    /// is a no-op: fake queues always exist.
     /// </summary>
     /// <param name="services">Service collection.</param>
     /// <param name="bus">Bus to back the queues with; the already-registered or a new one when omitted.</param>
@@ -55,19 +57,17 @@ public static class FakeMessagingServiceCollectionExtensions
         foreach (var property in model.Properties)
             RegistrationGuards.EnsureNotBound(services, property.MessageType, $"AddFakeMessaging<{contextType.Name}>");
 
+        // One call binds both kinds, where production takes one registration per transport: a test
+        // should not have to know which transport serves which property.
         foreach (var property in model.Properties)
-            builder.AddQueueCore(property.MessageType, property.LogicalName, new QueueSettings());
-
-        services.AddSingleton(sp =>
         {
-            var context = ActivatorUtilities.CreateInstance<TContext>(sp);
-            context.Initialize(
-                model,
-                messageType => (IMessageQueue)sp.GetRequiredService(typeof(IMessageQueue<>).MakeGenericType(messageType)),
-                static (_, _) => Task.CompletedTask);
+            if (property.Kind == MessagingPropertyKind.Queue)
+                builder.AddQueueCore(property.MessageType, property.LogicalName, new QueueSettings());
+            else
+                builder.AddStreamCore(property.MessageType, property.LogicalName);
+        }
 
-            return context;
-        });
+        MessagingContexts.EnsureRegistered(services, contextType, model);
 
         return builder;
     }
@@ -119,6 +119,34 @@ public class FakeMessagingBuilder
     }
 
     /// <summary>
+    /// Binds a message type to a fake stream, by the same rule as the real transport: the name comes
+    /// from <paramref name="streamName"/> or the type's <see cref="QueueAttribute"/>. Publishing
+    /// behaves like a real stream — <see cref="PublishOptions.GroupId"/> is the partition key, and
+    /// options a stream cannot honour are refused.
+    /// </summary>
+    public FakeMessagingBuilder AddStream<TMessage>(string? streamName = null)
+        where TMessage : class
+    {
+        var name = LogicalNames.Resolve(typeof(TMessage), streamName, nameof(streamName), nameof(AddStream));
+        RegistrationGuards.EnsureNotBound<TMessage>(Services, nameof(AddStream));
+
+        AddStreamCore(typeof(TMessage), name);
+
+        return this;
+    }
+
+    /// <summary>Registers the typed stream and the sender alias — the fake counterpart of a provider's stream binding.</summary>
+    internal void AddStreamCore(Type messageType, string name)
+    {
+        var streamServiceType = typeof(IMessageStream<>).MakeGenericType(messageType);
+        var streamType = typeof(FakeMessageStream<>).MakeGenericType(messageType);
+
+        Services.AddSingleton(streamServiceType, sp => Activator.CreateInstance(
+            streamType, bus, name, sp.GetRequiredService<IMessageSerializer>())!);
+        Services.AddSingleton(typeof(IMessageSender<>).MakeGenericType(messageType), sp => sp.GetRequiredService(streamServiceType));
+    }
+
+    /// <summary>
     /// Registers a handler, so pending messages can be dispatched into it by the bus. One handler per
     /// message type — a second registration throws, like <c>AddConsumer</c> in production.
     /// </summary>
@@ -131,4 +159,10 @@ public class FakeMessagingBuilder
         Services.AddScoped<IMessageHandler<TMessage>, THandler>();
         return this;
     }
+}
+
+/// <summary>Provisioning of fake queues: there is nothing to create, so there is nothing to do.</summary>
+internal sealed class FakeQueueProvisioner : IQueueProvisioner
+{
+    public Task EnsureQueueAsync(Type messageType, CancellationToken cancellationToken) => Task.CompletedTask;
 }

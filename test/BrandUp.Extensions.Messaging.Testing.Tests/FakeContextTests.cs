@@ -48,6 +48,35 @@ public class FakeContextTests
         await provider.GetRequiredService<OrderMessaging>().EnsureQueuesAsync();
     }
 
+    [Fact]
+    public async Task Context_WithQueuesAndStreams_BindsBoth()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeMessaging<MixedMessaging>();
+
+        await using var provider = services.BuildServiceProvider();
+        var bus = provider.GetRequiredService<InMemoryMessageBus>();
+        var context = provider.GetRequiredService<MixedMessaging>();
+
+        // In production this context takes two registrations, one per transport; a test should not
+        // have to know that.
+        Assert.Same(context.Created, provider.GetRequiredService<IMessageQueue<OrderCreated>>());
+        Assert.Same(context.Events, provider.GetRequiredService<IMessageStream<OrderEvent>>());
+        Assert.Same(context.Events, context.Stream<OrderEvent>());
+        Assert.Single(context.Queues);
+        Assert.Single(context.Streams);
+        Assert.Equal("order-events", context.Events.Name);
+
+        await context.Created.PublishAsync(new OrderCreated { OrderId = Guid.NewGuid() });
+        await context.Events.PublishAsync(new OrderEvent());
+
+        Assert.Single(bus.PublishedOf<OrderCreated>());
+        Assert.Single(bus.PublishedOf<OrderEvent>());
+
+        // Only the queue is provisioned; the stream is left alone.
+        await context.EnsureQueuesAsync();
+    }
+
     [Queue("order-created")]
     public class OrderCreated
     {
@@ -56,9 +85,18 @@ public class FakeContextTests
 
     public class OrderCancelled;
 
+    [Queue("order-events")]
+    public class OrderEvent;
+
     public class OrderMessaging : MessagingContext
     {
         public IMessageQueue<OrderCreated> Created { get; private set; } = null!;
         [Queue("orders-cancelled")] public IMessageQueue<OrderCancelled> Cancelled { get; private set; } = null!;
+    }
+
+    public class MixedMessaging : MessagingContext
+    {
+        public IMessageQueue<OrderCreated> Created { get; private set; } = null!;
+        public IMessageStream<OrderEvent> Events { get; private set; } = null!;
     }
 }

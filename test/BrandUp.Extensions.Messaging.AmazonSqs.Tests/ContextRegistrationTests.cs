@@ -56,6 +56,34 @@ public class ContextRegistrationTests
     }
 
     [Fact]
+    public void Context_StreamProperty_IsLeftToTheStreamTransport()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSqsMessaging<MixedMessaging>(ConfigureConnection);
+
+        using var provider = services.BuildServiceProvider();
+
+        // The queue half is bound; the stream half is not, and the error says which registration is missing.
+        Assert.NotNull(provider.GetRequiredService<IMessageQueue<OrderCreated>>());
+
+        var exception = Assert.Throws<InvalidOperationException>(provider.GetRequiredService<MixedMessaging>);
+        Assert.Contains("AddKinesisMessaging", exception.Message);
+        Assert.Contains(nameof(MixedMessaging.Events), exception.Message);
+    }
+
+    [Fact]
+    public void Context_WithoutQueues_Throws()
+    {
+        var services = new ServiceCollection();
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => services.AddSqsMessaging<StreamsOnlyMessaging>(ConfigureConnection));
+
+        Assert.Contains("IMessageQueue", exception.Message);
+    }
+
+    [Fact]
     public void Context_MissingConnection_ThrowsWithHint()
     {
         var services = new ServiceCollection();
@@ -127,6 +155,20 @@ public class ContextRegistrationTests
     }
 
     public class ForeignMessage;
+
+    [Queue("order-events")]
+    public class OrderEvent;
+
+    public class MixedMessaging : MessagingContext
+    {
+        public IMessageQueue<OrderCreated> Created { get; private set; } = null!;
+        public IMessageStream<OrderEvent> Events { get; private set; } = null!;
+    }
+
+    public class StreamsOnlyMessaging : MessagingContext
+    {
+        public IMessageStream<OrderEvent> Events { get; private set; } = null!;
+    }
 
     public class OrderMessaging : MessagingContext
     {

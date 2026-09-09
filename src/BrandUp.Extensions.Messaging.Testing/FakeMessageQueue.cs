@@ -1,6 +1,4 @@
-using System.Collections.ObjectModel;
 using BrandUp.Extensions.Messaging.Internals;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace BrandUp.Extensions.Messaging;
 
@@ -26,34 +24,9 @@ public class FakeMessageQueue<TMessage>(InMemoryMessageBus bus, string name, IMe
         ArgumentNullException.ThrowIfNull(message);
         SqsLimits.ValidatePublish(options, settings.Fifo, nameof(options));
 
-        // Round-trip through the serializer exactly like a real transport: a payload that cannot be
-        // serialized must fail in tests, and the handler must not receive the publisher's instance.
-        var payload = serializer.Serialize(message);
-
-        var added = bus.Add(new FakePublishedMessage
-        {
-            MessageId = "", // assigned by the bus
-            MessageType = typeof(TMessage),
-            Payload = payload,
-            QueueName = Name,
-            Options = options,
-            GroupId = settings.Fifo ? options?.GroupId ?? "default" : null,
-            // Snapshot: PublishOptions is mutable and may be reused by the caller.
-            Attributes = options is { Attributes.Count: > 0 }
-                ? new Dictionary<string, string>(options.Attributes, StringComparer.Ordinal)
-                : ReadOnlyDictionary<string, string>.Empty,
-            PublishedAt = DateTimeOffset.UtcNow,
-            Deserialize = payload => (TMessage)serializer.Deserialize(payload, typeof(TMessage)),
-            DispatchCore = static async (serviceProvider, published, cancellationToken) =>
-            {
-                await using var scope = serviceProvider.CreateAsyncScope();
-                var handler = scope.ServiceProvider.GetService<IMessageHandler<TMessage>>()
-                    ?? throw new MessagingException(
-                        $"No IMessageHandler<{typeof(TMessage).Name}> is registered to dispatch the pending message.");
-
-                await handler.HandleAsync(new MessageContext<TMessage>(published.ToReceived<TMessage>(), published.QueueName), cancellationToken);
-            },
-        });
+        // A FIFO queue always delivers grouped; a standard queue has no groups at all.
+        var groupId = settings.Fifo ? options?.GroupId ?? "default" : null;
+        var added = FakePublications.Publish(bus, Name, message, options, groupId, serializer);
 
         return Task.FromResult(new PublishResult { MessageId = added.MessageId });
     }

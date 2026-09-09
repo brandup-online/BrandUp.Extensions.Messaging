@@ -7,9 +7,6 @@ namespace BrandUp.Extensions.Messaging.Internals;
 internal sealed class KinesisMessageStream<TMessage> : IMessageStream<TMessage>
     where TMessage : class
 {
-    // The Kinesis partition-key limit.
-    const int MaxPartitionKeyLength = 256;
-
     readonly IKinesisClientFactory clientFactory;
     readonly IMessageSerializer serializer;
     readonly Lazy<string> name;
@@ -42,26 +39,7 @@ internal sealed class KinesisMessageStream<TMessage> : IMessageStream<TMessage>
     {
         ArgumentNullException.ThrowIfNull(message);
 
-        // Options a stream cannot honour are refused rather than dropped: silently ignoring a delay
-        // would make a message type behave differently after moving from a queue to a stream.
-        if (publishOptions?.Delay is not null)
-            throw new ArgumentException(
-                "Streams do not support delayed delivery; publish later or use a queue.", nameof(publishOptions));
-
-        if (publishOptions?.DeduplicationId is not null)
-            throw new ArgumentException(
-                "Streams do not deduplicate; remove DeduplicationId or use a FIFO queue.", nameof(publishOptions));
-
-        // Records sharing a partition key land in one shard and keep their order; without a group the
-        // records spread across shards evenly. An empty GroupId (e.g. derived from missing data) would
-        // be rejected server-side, so it falls back like null does.
-        var partitionKey = publishOptions?.GroupId;
-        if (string.IsNullOrEmpty(partitionKey))
-            partitionKey = Guid.NewGuid().ToString("N");
-        else if (partitionKey.Length > MaxPartitionKeyLength)
-            throw new ArgumentException(
-                $"GroupId is {partitionKey.Length} characters; the Kinesis partition-key limit is {MaxPartitionKeyLength}.",
-                nameof(publishOptions));
+        var partitionKey = StreamLimits.ResolvePartitionKey(publishOptions, nameof(publishOptions));
 
         var request = new PutRecordRequest
         {

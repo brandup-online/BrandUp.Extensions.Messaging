@@ -3,26 +3,43 @@ using System.Reflection;
 
 namespace BrandUp.Extensions.Messaging.Internals;
 
-/// <summary>
-/// One <see cref="IMessageQueue{TMessage}"/> property of a messaging context: which message type it
-/// serves and its logical queue name. The physical name is resolved later, from the options of the
-/// connection the context is bound to.
-/// </summary>
-internal sealed class MessagingProperty(PropertyInfo property, Type messageType, string logicalName)
+/// <summary>What a context property is bound to — the two transports a message type can live on.</summary>
+internal enum MessagingPropertyKind
 {
-    public PropertyInfo Property { get; } = property;
-    public Type MessageType { get; } = messageType;
-
-    /// <summary>Logical queue name — property [Queue], else the message type's [Queue], else the property name.</summary>
-    public string LogicalName { get; } = logicalName;
-
-    /// <summary>Assigns the queue to the property; works with <c>init</c> and non-public setters.</summary>
-    public void SetValue(object context, object queue) => Property.SetValue(context, queue);
+    Queue,
+    Stream,
 }
 
 /// <summary>
-/// Queue composition of a messaging context type. Built once per type: property scan and validation
-/// happen at registration, not on first access.
+/// One destination property of a messaging context: which message type it serves, whether it is a queue
+/// or a stream, and its logical name. The physical name is resolved later, from the options of the
+/// connection the context is bound to.
+/// </summary>
+internal sealed class MessagingProperty(
+    PropertyInfo property, Type messageType, MessagingPropertyKind kind, string logicalName)
+{
+    public PropertyInfo Property { get; } = property;
+    public Type MessageType { get; } = messageType;
+    public MessagingPropertyKind Kind { get; } = kind;
+
+    /// <summary>Logical queue or stream name — property [Queue], else the message type's [Queue], else the property name.</summary>
+    public string LogicalName { get; } = logicalName;
+
+    /// <summary>What the property is filled from: <c>IMessageQueue&lt;T&gt;</c> or <c>IMessageStream&lt;T&gt;</c>.</summary>
+    public Type ServiceType => Property.PropertyType;
+
+    /// <summary>Assigns the destination to the property; works with <c>init</c> and non-public setters.</summary>
+    public void SetValue(object context, object destination) => Property.SetValue(context, destination);
+}
+
+/// <summary>
+/// Destination composition of a messaging context type. Built once per type: property scan and
+/// validation happen at registration, not on first access.
+/// <para>
+/// Queues and streams may be declared side by side. Each transport registers only the properties it
+/// serves — the SQS registration the queues, the Kinesis one the streams — so a context spanning both
+/// is registered twice, once per transport.
+/// </para>
 /// </summary>
 internal sealed class MessagingModel
 {
@@ -32,16 +49,20 @@ internal sealed class MessagingModel
     {
         ContextType = contextType;
         Properties = properties;
+        Queues = [.. properties.Where(p => p.Kind == MessagingPropertyKind.Queue)];
+        Streams = [.. properties.Where(p => p.Kind == MessagingPropertyKind.Stream)];
     }
 
     public Type ContextType { get; }
     public IReadOnlyList<MessagingProperty> Properties { get; }
+    public IReadOnlyList<MessagingProperty> Queues { get; }
+    public IReadOnlyList<MessagingProperty> Streams { get; }
 
-    /// <summary>Property by message type; throws when the context has no queue for it.</summary>
-    public MessagingProperty RequireProperty(Type messageType)
-        => Properties.FirstOrDefault(p => p.MessageType == messageType)
+    /// <summary>Property by message type and kind; throws when the context has no such destination.</summary>
+    public MessagingProperty RequireProperty(Type messageType, MessagingPropertyKind kind)
+        => Properties.FirstOrDefault(p => p.MessageType == messageType && p.Kind == kind)
             ?? throw new InvalidOperationException(
-                $"Messaging context {ContextType.Name} has no queue for message type {messageType.FullName}.");
+                $"Messaging context {ContextType.Name} has no {Word(kind)} for message type {messageType.FullName}.");
 
     public static MessagingModel Build(Type contextType)
     {
@@ -61,43 +82,44 @@ internal sealed class MessagingModel
 
         foreach (var property in contextType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
-            var messageType = MessageTypeOf(property.PropertyType);
-            if (messageType is null)
+            if (DestinationOf(property.PropertyType) is not var (messageType, kind))
                 continue;
 
             if (property.SetMethod is null)
                 throw new InvalidOperationException(
                     $"Property {contextType.Name}.{property.Name} must have a setter (private set or init is enough).");
 
+            // One message type, one destination — the same rule the transports enforce across packages.
             if (properties.FirstOrDefault(p => p.MessageType == messageType) is { } existing)
                 throw new InvalidOperationException(
                     $"Message type {messageType.FullName} is mapped twice in {contextType.Name}: " +
                     $"{existing.Property.Name} and {property.Name}.");
 
-            properties.Add(new MessagingProperty(property, messageType, LogicalNames.ResolveForMember(messageType, property)));
+            properties.Add(new MessagingProperty(property, messageType, kind, LogicalNames.ResolveForMember(messageType, property)));
         }
 
         if (properties.Count == 0)
             throw new InvalidOperationException(
-                $"Messaging context {contextType.Name} declares no IMessageQueue<TMessage> properties.");
+                $"Messaging context {contextType.Name} declares no IMessageQueue<TMessage> or IMessageStream<TMessage> properties.");
 
         return new MessagingModel(contextType, properties);
     }
 
-    static Type? MessageTypeOf(Type propertyType)
+    static (Type MessageType, MessagingPropertyKind Kind)? DestinationOf(Type propertyType)
     {
         if (!propertyType.IsGenericType)
             return null;
 
         var definition = propertyType.GetGenericTypeDefinition();
+
         if (definition == typeof(IMessageQueue<>))
-            return propertyType.GetGenericArguments()[0];
+            return (propertyType.GetGenericArguments()[0], MessagingPropertyKind.Queue);
 
         if (definition == typeof(IMessageStream<>))
-            throw new NotSupportedException(
-                "IMessageStream<TMessage> properties on a messaging context are not supported yet; " +
-                "register streams directly on the stream provider's builder.");
+            return (propertyType.GetGenericArguments()[0], MessagingPropertyKind.Stream);
 
         return null;
     }
+
+    internal static string Word(MessagingPropertyKind kind) => kind == MessagingPropertyKind.Queue ? "queue" : "stream";
 }

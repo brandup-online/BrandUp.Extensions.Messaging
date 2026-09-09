@@ -7,16 +7,17 @@ using Microsoft.Extensions.Options;
 
 namespace BrandUp.Extensions.Messaging.Internals;
 
-internal interface ISqsQueueProvider
+/// <summary>
+/// Queue lookup for the SQS transport. <see cref="IQueueProvisioner"/> is the part of it a messaging
+/// context needs — creating the queues it declares — and the only part the abstraction knows about.
+/// </summary>
+internal interface ISqsQueueProvider : IQueueProvisioner
 {
     IAmazonSQS ClientFor(Type messageType);
     string ResolveName(Type messageType);
     QueueSettings GetSettings(Type messageType);
     ValueTask<string> GetQueueUrlAsync(Type messageType, CancellationToken cancellationToken);
     Task<bool> QueueExistsAsync(Type messageType, CancellationToken cancellationToken);
-
-    /// <summary>Creates the queue (dead-letter included) when missing, regardless of AutoCreateQueues — explicit provisioning.</summary>
-    Task EnsureQueueAsync(Type messageType, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -43,6 +44,7 @@ internal sealed class SqsQueueProvider(
             ? ValueTask.FromResult(url)
             : new ValueTask<string>(ResolveOrCreateAsync(messageType, createIfMissing: null, cancellationToken));
 
+    /// <summary>Creates the queue (dead-letter included) when missing, regardless of AutoCreateQueues — explicit provisioning.</summary>
     public Task EnsureQueueAsync(Type messageType, CancellationToken cancellationToken)
         => urlCache.ContainsKey(messageType)
             ? Task.CompletedTask

@@ -27,6 +27,8 @@
 
   <ItemGroup>
     <Compile Include="..\Shared\RegistrationGuards.cs" Link="Internals\RegistrationGuards.cs" />
+    <Compile Include="..\Shared\MessagingContexts.cs" Link="Internals\MessagingContexts.cs" />
+    <Compile Include="..\Shared\StreamLimits.cs" Link="Internals\StreamLimits.cs" />
     <Compile Include="..\Shared\SqsLimits.cs" Link="Internals\SqsLimits.cs" />
   </ItemGroup>
 

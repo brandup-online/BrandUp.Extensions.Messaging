@@ -27,14 +27,36 @@ public class KinesisMessagingBuilder
         var logicalName = LogicalNames.Resolve(typeof(TMessage), streamName, nameof(streamName), nameof(AddStream));
         RegistrationGuards.EnsureNotBound<TMessage>(Services, nameof(AddStream));
 
-        Services.AddSingleton<IMessageStream<TMessage>>(sp => new KinesisMessageStream<TMessage>(
-            sp.GetRequiredService<IKinesisClientFactory>(),
-            sp.GetRequiredService<IMessageSerializer>(),
-            sp.GetRequiredService<IOptions<KinesisMessagingOptions>>(),
-            logicalName));
-        Services.AddSingleton<IMessageSender<TMessage>>(sp => sp.GetRequiredService<IMessageStream<TMessage>>());
+        AddStreamCore(typeof(TMessage), logicalName);
 
         return this;
+    }
+
+    /// <summary>
+    /// Binds the <see cref="IMessageStream{TMessage}"/> properties of a messaging context to this
+    /// connection — the declarative counterpart of <see cref="AddStream{TMessage}"/>. Queues of the
+    /// same context are bound separately, by the queue transport.
+    /// </summary>
+    public KinesisMessagingContextBuilder<TContext> AddContext<TContext>()
+        where TContext : MessagingContext
+    {
+        var contextType = typeof(TContext);
+        var model = MessagingModel.Build(contextType);      // property scan + validation at registration
+        var method = $"AddContext<{contextType.Name}>";
+
+        var streams = MessagingContexts.PropertiesFor(model, MessagingPropertyKind.Stream, method);
+
+        // Guard the whole context before registering any of it: a failure halfway through would leave
+        // earlier streams bound with no context to serve them.
+        foreach (var property in streams)
+            RegistrationGuards.EnsureNotBound(Services, property.MessageType, method);
+
+        foreach (var property in streams)
+            AddStreamCore(property.MessageType, property.LogicalName);
+
+        MessagingContexts.EnsureRegistered(Services, contextType, model);
+
+        return new KinesisMessagingContextBuilder<TContext>(Services, model);
     }
 
     /// <summary>
@@ -58,30 +80,57 @@ public class KinesisMessagingBuilder
         where TMessage : class
         where THandler : class, IMessageHandler<TMessage>
     {
-        RegistrationGuards.EnsureNoHandler<TMessage>(Services, nameof(AddConsumer));
-
         if (!Services.Any(d => d.ServiceType == typeof(IMessageStream<TMessage>)))
             AddStream<TMessage>();
 
-        Services.AddScoped<IMessageHandler<TMessage>, THandler>();
-        if (configure is not null)
-            Services.Configure(KinesisConsumerOptions.NameFor(typeof(TMessage)), configure);
+        KinesisMessagingServiceCollectionExtensions.AddConsumerCore<TMessage, THandler>(Services, configure);
 
-        Services.AddSingleton<Microsoft.Extensions.Hosting.IHostedService>(sp =>
-        {
-            var checkpoints = sp.GetService<ICheckpointStore>()
-                ?? throw new InvalidOperationException(
-                    $"Reading stream {typeof(TMessage).Name} needs an {nameof(ICheckpointStore)}: register one " +
-                    "(AddMongoMessagingCheckpoints in production, AddInMemoryMessagingCheckpoints in tests) before AddConsumer, " +
-                    "or the reader would re-read the stream from the start after every restart.");
+        return this;
+    }
 
-            // Optional: without a lease store the reader assumes it is the only one of its group.
-            var leases = sp.GetService<IShardLeaseStore>();
+    /// <summary>The one meaning of "bind a message type to a stream": the typed stream and the sender alias.</summary>
+    internal void AddStreamCore(Type messageType, string logicalName)
+    {
+        var streamServiceType = typeof(IMessageStream<>).MakeGenericType(messageType);
+        var streamType = typeof(KinesisMessageStream<>).MakeGenericType(messageType);
 
-            return leases is null
-                ? ActivatorUtilities.CreateInstance<KinesisConsumerService<TMessage>>(sp, checkpoints)
-                : ActivatorUtilities.CreateInstance<KinesisConsumerService<TMessage>>(sp, checkpoints, leases);
-        });
+        Services.AddSingleton(streamServiceType, sp => Activator.CreateInstance(
+            streamType,
+            sp.GetRequiredService<IKinesisClientFactory>(),
+            sp.GetRequiredService<IMessageSerializer>(),
+            sp.GetRequiredService<IOptions<KinesisMessagingOptions>>(),
+            logicalName)!);
+
+        Services.AddSingleton(
+            typeof(IMessageSender<>).MakeGenericType(messageType), sp => sp.GetRequiredService(streamServiceType));
+    }
+}
+
+/// <summary>Builder of one registered messaging context: the consumers of its streams.</summary>
+public class KinesisMessagingContextBuilder<TContext>
+    where TContext : MessagingContext
+{
+    readonly MessagingModel model;
+
+    internal KinesisMessagingContextBuilder(IServiceCollection services, MessagingModel model)
+    {
+        Services = services;
+        this.model = model;
+    }
+
+    public IServiceCollection Services { get; }
+
+    /// <summary>
+    /// Registers the hosted reader of <typeparamref name="TMessage"/> — one of the context's streams.
+    /// One reader per message type; a second registration throws. See
+    /// <see cref="KinesisMessagingBuilder.AddConsumer{TMessage, THandler}"/> for the semantics.
+    /// </summary>
+    public KinesisMessagingContextBuilder<TContext> AddConsumer<TMessage, THandler>(Action<KinesisConsumerOptions>? configure = null)
+        where TMessage : class
+        where THandler : class, IMessageHandler<TMessage>
+    {
+        model.RequireProperty(typeof(TMessage), MessagingPropertyKind.Stream);
+        KinesisMessagingServiceCollectionExtensions.AddConsumerCore<TMessage, THandler>(Services, configure);
 
         return this;
     }

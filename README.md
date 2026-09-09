@@ -134,7 +134,7 @@ public class Worker(IMessageQueue<OrderCreated> queue)
 
 ## Контексты мессаджинга и несколько аккаунтов
 
-Регистрация выше описывает одно подключение — один облачный аккаунт. Когда очередей много или аккаунтов несколько, удобнее объявить **контекст мессаджинга**: класс-наследник `MessagingContext`, в котором очереди описаны свойствами — полный аналог `ObjectStorageContext` из BrandUp.Extensions.ObjectStorage. Тип контекста задаёт и состав очередей, и подключение.
+Регистрация выше описывает одно подключение — один облачный аккаунт. Когда назначений много или аккаунтов несколько, удобнее объявить **контекст мессаджинга**: класс-наследник `MessagingContext`, в котором очереди и стримы описаны свойствами — полный аналог `ObjectStorageContext` из BrandUp.Extensions.ObjectStorage. Тип контекста задаёт и состав назначений, и подключение.
 
 ```csharp
 public class OrderMessaging : MessagingContext
@@ -155,7 +155,27 @@ services.AddSqsMessaging<OrderMessaging>("main");
 services.AddSqsMessaging<BillingMessaging>("main");
 ```
 
-Логическое имя очереди свойства: `[Queue]` на свойстве → `[Queue]` на типе сообщения → имя свойства. Состав валидируется на регистрации (сеттер обязателен, один тип сообщения — одно свойство, привязка типа в другом транспорте — ошибка). Инжектировать можно и весь контекст, и отдельные `IMessageQueue<T>` — это одни и те же экземпляры.
+Логическое имя свойства: `[Queue]` на свойстве → `[Queue]` на типе сообщения → имя свойства. Состав валидируется на регистрации (сеттер обязателен, один тип сообщения — одно свойство, привязка типа в другом транспорте — ошибка). Инжектировать можно и весь контекст, и отдельные `IMessageQueue<T>` — это одни и те же экземпляры.
+
+### Очереди и стримы в одном контексте
+
+Свойства могут быть и `IMessageStream<T>` — тогда контекст описывает и очереди, и стримы. Транспорты разные, поэтому контекст регистрируется в каждом: SQS заполняет очереди, Kinesis — стримы. Порядок вызовов не важен.
+
+```csharp
+public class OrderMessaging : MessagingContext
+{
+    public IMessageQueue<OrderCreated> Created { get; private set; } = null!;
+    public IMessageStream<OrderEvent> Events { get; private set; } = null!;
+}
+
+services.AddSqsMessaging<OrderMessaging>(options => { ... })      // очереди контекста
+    .AddConsumer<OrderCreated, OrderCreatedHandler>();
+
+services.AddKinesisMessaging<OrderMessaging>(options => { ... })  // стримы того же контекста
+    .AddConsumer<OrderEvent, OrderEventHandler>(options => options.ConsumerGroup = "billing");
+```
+
+Если стрим-транспорт не зарегистрирован, контекст не соберётся, и ошибка назовёт и свойство, и нужный вызов — свойство никогда не остаётся `null`. Контекст только со стримами тоже допустим; регистрация транспорта, для которого в контексте нет ни одного свойства, — ошибка регистрации, а не молчаливый no-op. `EnsureQueuesAsync` создаёт только очереди: у стрима есть число шардов и retention, это инфраструктура, а не старт приложения.
 
 ```csharp
 public class Provisioning(OrderMessaging messaging)
@@ -166,7 +186,7 @@ public class Provisioning(OrderMessaging messaging)
 }
 ```
 
-В тестах тот же тип контекста поднимается поверх in-memory шины: `services.AddFakeMessaging<OrderMessaging>()` — свойства заполнены фейковыми очередями, `EnsureQueuesAsync` — no-op.
+В тестах тот же тип контекста поднимается поверх in-memory шины одним вызовом: `services.AddFakeMessaging<OrderMessaging>()` — заполняются и очереди, и стримы, `EnsureQueuesAsync` — no-op.
 
 ---
 
@@ -186,7 +206,9 @@ services.AddKinesisMessaging(options =>
 .AddStream<OrderCreated>("order-events");
 ```
 
-Публикация — тем же `IMessagePublisher`; `PublishOptions.GroupId` становится partition key (записи одной группы попадают в один шард и сохраняют порядок). Очереди и стримы можно смешивать в одном приложении: каждый тип сообщения привязан к своему транспорту. Опции, которые стрим выполнить не может (`Delay`, `DeduplicationId`), приводят к ошибке, а не игнорируются молча.
+Публикация — тем же `IMessagePublisher`; `PublishOptions.GroupId` становится partition key (записи одной группы попадают в один шард и сохраняют порядок). Очереди и стримы можно смешивать в одном приложении и даже в одном [контексте](#очереди-и-стримы-в-одном-контексте): каждый тип сообщения привязан к своему транспорту. Опции, которые стрим выполнить не может (`Delay`, `DeduplicationId`), приводят к ошибке, а не игнорируются молча.
+
+В тестах стрим подменяется так же, как очередь: `services.AddFakeMessaging().AddStream<OrderEvent>()` даёт `FakeMessageStream` — публикации видны в `InMemoryMessageBus`, `GroupId` проверяется по тем же правилам, что и в проде, а `DispatchPendingAsync` доставляет записи в обработчик, как это делает hosted-ридер.
 
 ### Чтение стримов и чекпоинты
 
@@ -306,7 +328,6 @@ dotnet test
 
 ## Планы
 
-- Стримы как свойства `MessagingContext` (сейчас контекст поддерживает только очереди).
 - Батчевая публикация (`SendMessageBatch` / `PutRecords`).
 - Кастомный провайдер учётных данных с автообновлением (аналог `IObjectStorageCredentialsProvider`); стандартная цепочка AWS SDK (IAM-роли) уже поддерживается.
 - Мост с outbox из BrandUp.Core: публикация доменных событий через `IMessagePublisher`.

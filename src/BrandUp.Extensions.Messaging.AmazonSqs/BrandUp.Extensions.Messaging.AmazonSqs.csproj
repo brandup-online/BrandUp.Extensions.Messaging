@@ -28,6 +28,7 @@
   <ItemGroup>
     <Compile Include="..\Shared\AwsConnection.cs" Link="Internals\AwsConnection.cs" />
     <Compile Include="..\Shared\RegistrationGuards.cs" Link="Internals\RegistrationGuards.cs" />
+    <Compile Include="..\Shared\MessagingContexts.cs" Link="Internals\MessagingContexts.cs" />
     <Compile Include="..\Shared\SqsLimits.cs" Link="Internals\SqsLimits.cs" />
   </ItemGroup>
 

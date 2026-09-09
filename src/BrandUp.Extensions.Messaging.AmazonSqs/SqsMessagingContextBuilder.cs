@@ -30,7 +30,7 @@ public class SqsMessagingContextBuilder<TContext>
 
         // Validates the message type belongs to this context, then mutates the settings instance the
         // registry already holds - the queue reads them lazily, at creation time.
-        model.RequireProperty(typeof(TMessage));
+        model.RequireProperty(typeof(TMessage), MessagingPropertyKind.Queue);
         var settings = registry.Get(typeof(TMessage)).Settings;
         configure(settings);
         SqsLimits.ValidateSettings(settings, nameof(configure));
@@ -47,7 +47,7 @@ public class SqsMessagingContextBuilder<TContext>
         where TMessage : class
         where THandler : class, IMessageHandler<TMessage>
     {
-        model.RequireProperty(typeof(TMessage));
+        model.RequireProperty(typeof(TMessage), MessagingPropertyKind.Queue);
         SqsMessagingServiceCollectionExtensions.AddConsumerCore<TMessage, THandler>(Services, configure);
 
         return this;
