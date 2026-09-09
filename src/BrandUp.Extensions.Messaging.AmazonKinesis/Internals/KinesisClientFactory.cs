@@ -5,24 +5,25 @@ namespace BrandUp.Extensions.Messaging.Internals;
 
 internal interface IKinesisClientFactory
 {
-    IAmazonKinesis Get();
+    /// <summary>Client of a connection; one client per connection name, created on first use.</summary>
+    IAmazonKinesis Get(string connectionName);
 }
 
-internal sealed class KinesisClientFactory : IKinesisClientFactory, IDisposable
+internal sealed class KinesisClientFactory(
+    IOptionsMonitor<KinesisMessagingOptions> options,
+    IServiceProvider services,
+    IEnumerable<MessagingCredentialsRegistration> credentials) : IKinesisClientFactory, IDisposable
 {
-    readonly Lazy<IAmazonKinesis> client;
+    // Lazy, because GetOrAdd may run its factory more than once under contention and a discarded
+    // AmazonKinesisClient would leak its connection pool.
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<IAmazonKinesis>> clients = new(StringComparer.Ordinal);
 
-    public KinesisClientFactory(
-        IOptions<KinesisMessagingOptions> options,
-        IServiceProvider services,
-        IEnumerable<MessagingCredentialsRegistration> credentials)
-    {
-        client = new(
-            () => Create(options.Value, CredentialsRegistrations.Resolve(services, credentials, Options.DefaultName)),
-            LazyThreadSafetyMode.ExecutionAndPublication);
-    }
-
-    public IAmazonKinesis Get() => client.Value;
+    public IAmazonKinesis Get(string connectionName)
+        => clients.GetOrAdd(
+            connectionName,
+            name => new Lazy<IAmazonKinesis>(
+                () => Create(options.Get(name), CredentialsRegistrations.Resolve(services, credentials, name)),
+                LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 
     static IAmazonKinesis Create(KinesisMessagingOptions options, IMessagingCredentialsProvider? provider)
     {
@@ -37,7 +38,12 @@ internal sealed class KinesisClientFactory : IKinesisClientFactory, IDisposable
 
     public void Dispose()
     {
-        if (client.IsValueCreated)
-            client.Value.Dispose();
+        foreach (var client in clients.Values)
+        {
+            if (client.IsValueCreated)
+                client.Value.Dispose();
+        }
+
+        clients.Clear();
     }
 }

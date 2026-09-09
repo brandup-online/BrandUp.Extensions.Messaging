@@ -98,7 +98,8 @@ public static class SqsMessagingServiceCollectionExtensions
 
         // The connection may be registered after the context, so this is checked when the context is
         // built rather than here.
-        services.AddSingleton<IMessagingContextCheck>(new SqsConnectionCheck(contextType, connectionName, registry));
+        services.AddSingleton<IMessagingContextCheck>(new MessagingConnectionCheck(
+            contextType, connectionName, registry.HasConnection, "AddSqsMessagingConnection", "AddSqsMessaging"));
         MessagingContexts.EnsureRegistered(services, contextType, model);
 
         return new SqsMessagingContextBuilder<TContext>(services, registry, model);
@@ -142,15 +143,7 @@ public static class SqsMessagingServiceCollectionExtensions
     // The registry is shared registration-time state, so it lives in the service collection as an
     // instance and is picked up by every subsequent AddSqsMessaging* call.
     static SqsMessagingRegistry GetOrAddRegistry(IServiceCollection services)
-    {
-        if (RegistrationGuards.FindInstance<SqsMessagingRegistry>(services) is { } existing)
-            return existing;
-
-        var registry = new SqsMessagingRegistry();
-        services.AddSingleton(registry);
-
-        return registry;
-    }
+        => RegistrationGuards.GetOrAddInstance<SqsMessagingRegistry>(services);
 
     /// <summary>
     /// The one meaning of "bind a message type to a queue", shared by the typed builder and the

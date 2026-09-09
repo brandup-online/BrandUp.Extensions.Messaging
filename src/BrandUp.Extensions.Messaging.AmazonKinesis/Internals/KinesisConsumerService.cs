@@ -33,7 +33,7 @@ namespace BrandUp.Extensions.Messaging.Internals;
 /// </summary>
 internal sealed class KinesisConsumerService<TMessage>(
     IMessageStream<TMessage> stream,
-    IKinesisClientFactory clientFactory,
+    IKinesisStreamProvider provider,
     ICheckpointStore checkpoints,
     IMessageSerializer serializer,
     IServiceScopeFactory scopeFactory,
@@ -49,6 +49,10 @@ internal sealed class KinesisConsumerService<TMessage>(
 
     // Identity of this reader in the lease store; set once the options are read.
     string owner = "";
+
+    // The factory owns client lifetime and caches per connection; caching again here would pin the
+    // first-resolved client past an options reload.
+    IAmazonKinesis Client => provider.ClientFor(typeof(TMessage));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -247,7 +251,7 @@ internal sealed class KinesisConsumerService<TMessage>(
 
                     iterator ??= await GetIteratorAsync(shardId, position, startedAt, options, stoppingToken);
 
-                    var response = await clientFactory.Get().GetRecordsAsync(
+                    var response = await Client.GetRecordsAsync(
                         new GetRecordsRequest { ShardIterator = iterator, Limit = options.BatchSize }, stoppingToken);
 
                     if (response.Records is { Count: > 0 } records)
@@ -484,7 +488,7 @@ internal sealed class KinesisConsumerService<TMessage>(
 
         try
         {
-            return (await clientFactory.Get().GetShardIteratorAsync(request, cancellationToken)).ShardIterator;
+            return (await Client.GetShardIteratorAsync(request, cancellationToken)).ShardIterator;
         }
         catch (AmazonKinesisException ex)
         {
@@ -494,7 +498,7 @@ internal sealed class KinesisConsumerService<TMessage>(
 
     async Task<IReadOnlyList<Shard>> ListShardsAsync(CancellationToken cancellationToken)
     {
-        var client = clientFactory.Get();
+        var client = Client;
         var shards = new List<Shard>();
         string? nextToken = null;
 

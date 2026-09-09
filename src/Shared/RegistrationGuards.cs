@@ -25,6 +25,22 @@ internal static class RegistrationGuards
     }
 
     /// <summary>
+    /// The registration-time state of a transport: the instance already in the collection, or a new one
+    /// put there. Every Add* call of a transport works on the same instance, which is what lets them
+    /// see each other's bindings.
+    /// </summary>
+    public static T GetOrAddInstance<T>(IServiceCollection services) where T : class, new()
+    {
+        if (FindInstance<T>(services) is { } existing)
+            return existing;
+
+        var created = new T();
+        services.AddSingleton(created);
+
+        return created;
+    }
+
+    /// <summary>
     /// A message type is bound to exactly one destination. Without this guard a second registration —
     /// a queue in one package, a stream in another — would silently last-win in DI and reroute
     /// messages.

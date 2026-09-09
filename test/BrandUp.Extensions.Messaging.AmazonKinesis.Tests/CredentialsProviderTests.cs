@@ -41,6 +41,23 @@ public class CredentialsProviderTests
     }
 
     [Fact]
+    public void Provider_IsBoundToItsConnection()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddKinesisMessagingConnection("archive", ConfigureConnection, validateOnStart: false)
+            .UseCredentialsProvider<StubProvider>();
+        services.AddKinesisMessaging(ConfigureConnection, validateOnStart: false);
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var registrations = serviceProvider.GetServices<MessagingCredentialsRegistration>();
+
+        Assert.NotNull(CredentialsRegistrations.Resolve(serviceProvider, registrations, "archive"));
+        // The default connection has none of its own, and must not borrow another account's credentials.
+        Assert.Null(CredentialsRegistrations.Resolve(serviceProvider, registrations, Options.DefaultName));
+    }
+
+    [Fact]
     public async Task Refresher_KeepsTheProviderWarm()
     {
         var provider = new StubProvider();

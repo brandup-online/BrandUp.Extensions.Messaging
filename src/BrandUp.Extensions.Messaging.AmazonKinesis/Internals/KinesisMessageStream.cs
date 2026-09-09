@@ -1,40 +1,30 @@
 using System.Text;
 using Amazon.Kinesis;
 using Amazon.Kinesis.Model;
-using Microsoft.Extensions.Options;
 
 namespace BrandUp.Extensions.Messaging.Internals;
 
 internal sealed class KinesisMessageStream<TMessage> : IMessageStream<TMessage>
     where TMessage : class
 {
-    readonly IKinesisClientFactory clientFactory;
+    readonly IKinesisStreamProvider provider;
     readonly IMessageSerializer serializer;
     readonly Lazy<string> name;
 
-    public KinesisMessageStream(
-        IKinesisClientFactory clientFactory,
-        IMessageSerializer serializer,
-        IOptions<KinesisMessagingOptions> options,
-        string logicalName)
+    public KinesisMessageStream(IKinesisStreamProvider provider, IMessageSerializer serializer)
     {
-        this.clientFactory = clientFactory;
+        this.provider = provider;
         this.serializer = serializer;
-        name = new(() =>
-        {
-            var resolved = options.Value.Streams.TryGetValue(logicalName, out var physicalName)
-                ? physicalName
-                : logicalName;
 
-            // Fail with a clear error at first use instead of an opaque PutRecord rejection.
-            if (string.IsNullOrWhiteSpace(resolved))
-                throw new MessagingException($"Physical stream name mapped for '{logicalName}' is empty.");
-
-            return resolved;
-        }, LazyThreadSafetyMode.ExecutionAndPublication);
+        // Immutable after startup and read per message - resolve once.
+        name = new(() => provider.ResolveName(typeof(TMessage)), LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public string Name => name.Value;
+
+    // The factory owns client lifetime and caches per connection; caching again here would pin the
+    // first-resolved client past an options reload.
+    IAmazonKinesis Client => provider.ClientFor(typeof(TMessage));
 
     public async Task<PublishResult> PublishAsync(TMessage message, PublishOptions? publishOptions = null, CancellationToken cancellationToken = default)
     {
@@ -51,7 +41,7 @@ internal sealed class KinesisMessageStream<TMessage> : IMessageStream<TMessage>
 
         try
         {
-            var response = await clientFactory.Get().PutRecordAsync(request, cancellationToken);
+            var response = await Client.PutRecordAsync(request, cancellationToken);
             return new PublishResult { MessageId = response.SequenceNumber, SequenceNumber = response.SequenceNumber };
         }
         catch (AmazonKinesisException ex)
@@ -105,7 +95,7 @@ internal sealed class KinesisMessageStream<TMessage> : IMessageStream<TMessage>
             PutRecordsResponse response;
             try
             {
-                response = await clientFactory.Get().PutRecordsAsync(request, cancellationToken);
+                response = await Client.PutRecordsAsync(request, cancellationToken);
             }
             catch (AmazonKinesisException ex)
             {

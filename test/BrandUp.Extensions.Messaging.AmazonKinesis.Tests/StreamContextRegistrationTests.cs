@@ -1,3 +1,4 @@
+using BrandUp.Extensions.Messaging.Internals;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -108,6 +109,73 @@ public class StreamContextRegistrationTests
     }
 
     [Fact]
+    public void Context_OnANamedConnection_UsesItsOptions()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddKinesisMessagingConnection("orders", options =>
+        {
+            ConfigureConnection(options);
+            options.Streams["order-placed"] = "/ru-central1/b1g/etn/dev-order-placed";
+        }, validateOnStart: false);
+        services.AddKinesisMessaging<OrderEvents>("orders");
+
+        using var provider = services.BuildServiceProvider();
+
+        // The physical name comes from the connection the context is bound to, not from a global map.
+        Assert.Equal("/ru-central1/b1g/etn/dev-order-placed", provider.GetRequiredService<OrderEvents>().Placed.Name);
+    }
+
+    [Fact]
+    public void Contexts_OnDifferentAccounts_ReadEachTheirOwn()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddKinesisMessagingConnection("main", options =>
+        {
+            ConfigureConnection(options);
+            options.Streams["order-placed"] = "/main/order-placed";
+        }, validateOnStart: false);
+        services.AddKinesisMessagingConnection("archive", options =>
+        {
+            options.ServiceUrl = "https://kinesis.us-east-1.amazonaws.com";
+            options.Region = "us-east-1";
+            // Static keys on purpose: a client built without any would send the SDK down its default
+            // credential chain, and probing instance metadata takes minutes off an EC2 host.
+            options.AccessKeyId = "x";
+            options.SecretAccessKey = "x";
+            options.Streams["order-archived"] = "/archive/order-archived";
+        }, validateOnStart: false);
+
+        services.AddKinesisMessaging<OrderEvents>("main");
+        services.AddKinesisMessaging<ArchiveEvents>("archive");
+
+        using var provider = services.BuildServiceProvider();
+
+        Assert.Equal("/main/order-placed", provider.GetRequiredService<OrderEvents>().Placed.Name);
+        Assert.Equal("/archive/order-archived", provider.GetRequiredService<ArchiveEvents>().Archived.Name);
+
+        // Different accounts mean different clients; streams of one connection share theirs.
+        var streams = provider.GetRequiredService<IKinesisStreamProvider>();
+        Assert.NotSame(streams.ClientFor(typeof(OrderPlaced)), streams.ClientFor(typeof(OrderArchived)));
+        Assert.Same(streams.ClientFor(typeof(OrderPlaced)), streams.ClientFor(typeof(OrderShipped)));
+    }
+
+    [Fact]
+    public void Context_MissingConnection_ThrowsWithHint()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddKinesisMessaging<OrderEvents>("not-registered");
+
+        using var provider = services.BuildServiceProvider();
+
+        var exception = Assert.Throws<InvalidOperationException>(provider.GetRequiredService<OrderEvents>);
+        Assert.Contains("not-registered", exception.Message);
+        Assert.Contains("AddKinesisMessagingConnection", exception.Message);
+    }
+
+    [Fact]
     public void Context_WithoutStreams_Throws()
     {
         var services = new ServiceCollection();
@@ -122,10 +190,10 @@ public class StreamContextRegistrationTests
     public void Context_BindingAMessageTypeTwice_Throws()
     {
         var services = new ServiceCollection();
-        var builder = services.AddKinesisMessaging(ConfigureConnection, validateOnStart: false);
-        builder.AddStream<OrderPlaced>();
+        services.AddKinesisMessaging(ConfigureConnection, validateOnStart: false).AddStream<OrderPlaced>();
 
-        Assert.Throws<InvalidOperationException>(() => builder.AddContext<OrderEvents>());
+        Assert.Throws<InvalidOperationException>(
+            () => services.AddKinesisMessaging<OrderEvents>(ConfigureConnection, validateOnStart: false));
     }
 
     [Fact]
@@ -174,6 +242,13 @@ public class StreamContextRegistrationTests
     {
         public IMessageQueue<OrderCreated> Created { get; private set; } = null!;
         public IMessageStream<OrderPlaced> Placed { get; private set; } = null!;
+    }
+
+    public class OrderArchived;
+
+    public class ArchiveEvents : MessagingContext
+    {
+        [Queue("order-archived")] public IMessageStream<OrderArchived> Archived { get; private set; } = null!;
     }
 
     public class QueuesOnlyMessaging : MessagingContext

@@ -180,6 +180,8 @@ services.AddSqsMessaging<OrderMessaging>("main");
 services.AddSqsMessaging<BillingMessaging>("main");
 ```
 
+У стримов всё устроено так же — `AddKinesisMessagingConnection` и `AddKinesisMessaging<TContext>`, см. [подключения Kinesis](#несколько-аккаунтов-kinesis).
+
 Логическое имя свойства: `[Queue]` на свойстве → `[Queue]` на типе сообщения → имя свойства. Состав валидируется на регистрации (сеттер обязателен, один тип сообщения — одно свойство, привязка типа в другом транспорте — ошибка). Инжектировать можно и весь контекст, и отдельные `IMessageQueue<T>` — это одни и те же экземпляры.
 
 ### Очереди и стримы в одном контексте
@@ -270,6 +272,31 @@ services.AddKinesisMessaging(options =>
 Публикация — тем же `IMessagePublisher`; `PublishOptions.GroupId` становится partition key (записи одной группы попадают в один шард и сохраняют порядок). Очереди и стримы можно смешивать в одном приложении и даже в одном [контексте](#очереди-и-стримы-в-одном-контексте): каждый тип сообщения привязан к своему транспорту. Опции, которые стрим выполнить не может (`Delay`, `DeduplicationId`), приводят к ошибке, а не игнорируются молча.
 
 В тестах стрим подменяется так же, как очередь: `services.AddFakeMessaging().AddStream<OrderEvent>()` даёт `FakeMessageStream` — публикации видны в `InMemoryMessageBus`, `GroupId` проверяется по тем же правилам, что и в проде, а `DispatchPendingAsync` доставляет записи в обработчик, как это делает hosted-ридер.
+
+### Несколько аккаунтов Kinesis
+
+Подключений может быть несколько — по одному на аккаунт, ровно как у очередей. Именованное подключение объявляется отдельно, контексты привязываются к нему по имени и делят один Kinesis-клиент; у каждого подключения свои опции, своя карта `Streams` и свой [провайдер учётных данных](#учётные-данные):
+
+```csharp
+services.AddKinesisMessagingConnection("main", options =>
+{
+    options.ServiceUrl = "https://yds.serverless.yandexcloud.net";
+    options.Region     = "ru-central1";
+    options.Streams["order-events"] = "/ru-central1/b1g.../etn.../order-events";
+});
+
+services.AddKinesisMessagingConnection("archive", options => { ... })
+    .UseCredentialsProvider<ArchiveCredentialsProvider>();
+
+services.AddKinesisMessaging<OrderEvents>("main");
+services.AddKinesisMessaging<ArchiveEvents>("archive");
+
+// Или контекст со своим подключением, настроенным на месте
+services.AddKinesisMessaging<ReportEvents>(options => { ... })
+    .AddConsumer<ReportGenerated, ReportGeneratedHandler>();
+```
+
+Порядок вызовов не важен: контекст можно зарегистрировать до объявления подключения — если подключения не окажется, ошибка при сборке контекста назовёт и имя, и нужный вызов. Одно логическое имя стрима в разных подключениях указывает на разные физические стримы: имя разрешается по опциям того подключения, к которому привязан тип сообщения.
 
 ### Чтение стримов и чекпоинты
 

@@ -30,6 +30,7 @@
     <Compile Include="..\Shared\CredentialsRegistrations.cs" Link="Internals\CredentialsRegistrations.cs" />
     <Compile Include="..\Shared\RegistrationGuards.cs" Link="Internals\RegistrationGuards.cs" />
     <Compile Include="..\Shared\MessagingContexts.cs" Link="Internals\MessagingContexts.cs" />
+    <Compile Include="..\Shared\MessagingConnectionCheck.cs" Link="Internals\MessagingConnectionCheck.cs" />
     <Compile Include="..\Shared\PublishBatches.cs" Link="Internals\PublishBatches.cs" />
     <Compile Include="..\Shared\StreamLimits.cs" Link="Internals\StreamLimits.cs" />
   </ItemGroup>
