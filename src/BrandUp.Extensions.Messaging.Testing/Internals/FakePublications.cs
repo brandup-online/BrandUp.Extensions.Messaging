@@ -10,6 +10,42 @@ namespace BrandUp.Extensions.Messaging.Internals;
 /// </summary>
 internal static class FakePublications
 {
+    /// <summary>
+    /// A batch on the fake: every message is checked first and only then published, one after another —
+    /// which is what a batch amounts to in memory. The limits that make a real transport split a batch
+    /// have no meaning here, but the order matters: production rejects a batch holding a bad message
+    /// before anything goes out, and a fake that published the first half would hide that.
+    /// </summary>
+    /// <param name="validate">
+    /// Checks one message the way a single publish does; it is given the parameter name to blame, so an
+    /// error points at the position in the batch.
+    /// </param>
+    public static async Task<IReadOnlyList<PublishResult>> PublishEachAsync<TMessage>(
+        IReadOnlyCollection<PublishMessage<TMessage>> messages,
+        Action<PublishMessage<TMessage>, string> validate,
+        Func<TMessage, PublishOptions?, CancellationToken, Task<PublishResult>> publish,
+        CancellationToken cancellationToken)
+        where TMessage : class
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+
+        var position = 0;
+        foreach (var item in messages)
+        {
+            ArgumentNullException.ThrowIfNull(item, nameof(messages));
+            ArgumentNullException.ThrowIfNull(item.Message, nameof(messages));
+
+            validate(item, $"{nameof(messages)}[{position}]");
+            position++;
+        }
+
+        var results = new List<PublishResult>(messages.Count);
+        foreach (var item in messages)
+            results.Add(await publish(item.Message, item.Options, cancellationToken));
+
+        return results;
+    }
+
     /// <remarks>
     /// <paramref name="groupId"/> is the group the message arrives in — the FIFO message group of a
     /// queue, the partition key of a stream, or <see langword="null"/> on a standard queue, which has

@@ -125,6 +125,10 @@ public class ConsumerDispatchTests
 
         public string Name => "stub";
 
+        public Task<IReadOnlyList<PublishResult>> PublishAsync(
+            IReadOnlyCollection<PublishMessage<TestMessage>> messages, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
         public Task<IReadOnlyList<ReceivedMessage<TestMessage>>> ReceiveAsync(int maxMessages = 1, TimeSpan? waitTime = null, CancellationToken cancellationToken = default)
         {
             if (Interlocked.Exchange(ref delivered, 1) == 0)

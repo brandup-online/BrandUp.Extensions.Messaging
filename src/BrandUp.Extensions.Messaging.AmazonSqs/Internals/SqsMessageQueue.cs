@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text;
 using Amazon.SQS;
 using Amazon.SQS.Model;
 using Microsoft.Extensions.Logging;
@@ -45,43 +46,162 @@ internal sealed class SqsMessageQueue<TMessage> : IMessageQueue<TMessage>
         ArgumentNullException.ThrowIfNull(message);
 
         var settings = provider.GetSettings(typeof(TMessage));
-        SqsLimits.ValidatePublish(options, settings.Fifo, nameof(options));
+        var prepared = Prepare(message, options, settings, nameof(options));
 
         var queueUrl = await provider.GetQueueUrlAsync(typeof(TMessage), cancellationToken);
         var request = new SendMessageRequest
         {
             QueueUrl = queueUrl,
-            MessageBody = Serialize(message),
-            MessageAttributes = new Dictionary<string, MessageAttributeValue>
-            {
-                [MessagingConstants.TypeAttributeName] = new() { DataType = "String", StringValue = typeName.Value },
-            },
+            MessageBody = prepared.Body,
+            MessageAttributes = prepared.Attributes,
+            MessageGroupId = prepared.GroupId,
+            MessageDeduplicationId = prepared.DeduplicationId,
         };
 
-        if (options is not null)
-        {
-            if (options.Delay is TimeSpan delay)
-                request.DelaySeconds = SqsLimits.WholeSeconds(delay);
-
-            // The reserved type attribute is rejected by ValidatePublish, so nothing here can overwrite it.
-            foreach (var (key, value) in options.Attributes)
-                request.MessageAttributes[key] = new MessageAttributeValue { DataType = "String", StringValue = value };
-        }
-
-        if (settings.Fifo)
-        {
-            // FIFO requires a group id on every message; without an explicit one the queue acts as a single group.
-            request.MessageGroupId = options?.GroupId ?? "default";
-
-            // Without content-based deduplication SQS rejects a message that carries no deduplication id,
-            // so a parameterless publish gets a unique one - no deduplication, standard-queue expectations.
-            request.MessageDeduplicationId = options?.DeduplicationId
-                ?? (settings.ContentBasedDeduplication ? null : NewDeduplicationId());
-        }
+        if (prepared.DelaySeconds is int delaySeconds)
+            request.DelaySeconds = delaySeconds;
 
         var response = await SendAsync(request, cancellationToken);
         return new PublishResult { MessageId = response.MessageId, SequenceNumber = response.SequenceNumber };
     }
+
+    public async Task<IReadOnlyList<PublishResult>> PublishAsync(
+        IReadOnlyCollection<PublishMessage<TMessage>> messages, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        if (messages.Count == 0)
+            return [];
+
+        var settings = provider.GetSettings(typeof(TMessage));
+
+        // Everything is prepared - and validated - before the first call, so a bad message in the middle
+        // of a batch is an error instead of a half-published batch.
+        var prepared = new PreparedMessage[messages.Count];
+        var position = 0;
+        foreach (var item in messages)
+        {
+            ArgumentNullException.ThrowIfNull(item, nameof(messages));
+            ArgumentNullException.ThrowIfNull(item.Message, nameof(messages));
+
+            prepared[position] = Prepare(item.Message, item.Options, settings, $"{nameof(messages)}[{position}]");
+            position++;
+        }
+
+        var queueUrl = await provider.GetQueueUrlAsync(typeof(TMessage), cancellationToken);
+        var results = new PublishResult?[prepared.Length];
+        var sizes = Array.ConvertAll(prepared, p => p.Bytes);
+        string? errorCode = null;
+
+        foreach (var (offset, count) in PublishBatches.Split(sizes, SqsLimits.MaxBatch, SqsLimits.MaxBatchBytes))
+        {
+            var request = new SendMessageBatchRequest
+            {
+                QueueUrl = queueUrl,
+                // The entry id is the position inside this call, which is how a result finds its message.
+                Entries = [.. Enumerable.Range(0, count).Select(i => EntryOf(prepared[offset + i], i))],
+            };
+
+            var response = await SendBatchAsync(request, settings, cancellationToken);
+
+            if (response.Successful is { Count: > 0 } successful)
+            {
+                foreach (var entry in successful)
+                    results[offset + int.Parse(entry.Id)] =
+                        new PublishResult { MessageId = entry.MessageId, SequenceNumber = entry.SequenceNumber };
+            }
+
+            // Which messages failed follows from the results that stayed empty; only the reason has to
+            // be picked up here, while the response still has it.
+            if (response.Failed is { Count: > 0 } failures)
+                errorCode ??= failures[0].Code;
+        }
+
+        return PublishBatches.Complete(results, $"queue '{Name}'", errorCode);
+    }
+
+    /// <summary>
+    /// A message as SQS needs it: serialized, with the type attribute, and with the FIFO fields a
+    /// group requires. One place for it, so a batch cannot drift from a single publish.
+    /// </summary>
+    PreparedMessage Prepare(TMessage message, PublishOptions? options, QueueSettings settings, string parameterName)
+    {
+        SqsLimits.ValidatePublish(options, settings.Fifo, parameterName);
+
+        var body = Serialize(message);
+        var attributes = new Dictionary<string, MessageAttributeValue>
+        {
+            [MessagingConstants.TypeAttributeName] = new() { DataType = "String", StringValue = typeName.Value },
+        };
+
+        int? delaySeconds = null;
+        if (options is not null)
+        {
+            if (options.Delay is TimeSpan delay)
+                delaySeconds = SqsLimits.WholeSeconds(delay);
+
+            // The reserved type attribute is rejected by ValidatePublish, so nothing here can overwrite it.
+            foreach (var (key, value) in options.Attributes)
+                attributes[key] = new MessageAttributeValue { DataType = "String", StringValue = value };
+        }
+
+        string? groupId = null;
+        string? deduplicationId = null;
+        if (settings.Fifo)
+        {
+            // FIFO requires a group id on every message; without an explicit one the queue acts as a single group.
+            groupId = options?.GroupId ?? "default";
+
+            // Without content-based deduplication SQS rejects a message that carries no deduplication id,
+            // so a parameterless publish gets a unique one - no deduplication, standard-queue expectations.
+            deduplicationId = options?.DeduplicationId
+                ?? (settings.ContentBasedDeduplication ? null : NewDeduplicationId());
+        }
+
+        return new PreparedMessage(body, attributes, delaySeconds, groupId, deduplicationId, SizeOf(body, attributes));
+    }
+
+    static SendMessageBatchRequestEntry EntryOf(PreparedMessage prepared, int id)
+    {
+        var entry = new SendMessageBatchRequestEntry
+        {
+            Id = id.ToString(),
+            MessageBody = prepared.Body,
+            MessageAttributes = prepared.Attributes,
+            MessageGroupId = prepared.GroupId,
+            MessageDeduplicationId = prepared.DeduplicationId,
+        };
+
+        if (prepared.DelaySeconds is int delaySeconds)
+            entry.DelaySeconds = delaySeconds;
+
+        return entry;
+    }
+
+    /// <summary>
+    /// What one message costs against the 256 KiB a request may carry. SQS counts an attribute's name,
+    /// its type and its value, so all three are counted here — an underestimate would build a batch the
+    /// server then rejects whole.
+    /// </summary>
+    static int SizeOf(string body, Dictionary<string, MessageAttributeValue> attributes)
+    {
+        var bytes = Encoding.UTF8.GetByteCount(body);
+        foreach (var (key, value) in attributes)
+        {
+            bytes += Encoding.UTF8.GetByteCount(key)
+                + Encoding.UTF8.GetByteCount(value.DataType ?? "")
+                + Encoding.UTF8.GetByteCount(value.StringValue ?? "");
+        }
+
+        return bytes;
+    }
+
+    readonly record struct PreparedMessage(
+        string Body,
+        Dictionary<string, MessageAttributeValue> Attributes,
+        int? DelaySeconds,
+        string? GroupId,
+        string? DeduplicationId,
+        int Bytes);
 
     public async Task<IReadOnlyList<ReceivedMessage<TMessage>>> ReceiveAsync(int maxMessages = 1, TimeSpan? waitTime = null, CancellationToken cancellationToken = default)
     {
@@ -326,6 +446,59 @@ internal sealed class SqsMessageQueue<TMessage> : IMessageQueue<TMessage>
             return await InvokeAsync(() => Client.SendMessageAsync(request, cancellationToken), "publish to");
         }
     }
+
+    /// <summary>
+    /// Sends one batch, with the same fallback a single publish has: a FIFO queue that lacks the
+    /// content-based deduplication its registration declares rejects entries without a deduplication
+    /// id, and those entries are re-sent once with a generated one.
+    /// </summary>
+    async Task<SendMessageBatchResponse> SendBatchAsync(
+        SendMessageBatchRequest request, QueueSettings settings, CancellationToken cancellationToken)
+    {
+        var response = await InvokeAsync(() => Client.SendMessageBatchAsync(request, cancellationToken), "publish to");
+
+        if (response.Failed is not { Count: > 0 } failures)
+            return response;
+
+        var retry = failures
+            .Where(RequiresDeduplicationId)
+            .Select(failure => request.Entries.First(entry => entry.Id == failure.Id))
+            .Where(entry => entry.MessageDeduplicationId is null)
+            .ToList();
+
+        if (retry.Count == 0)
+            return response;
+
+        logger.LogWarning(
+            "Queue {Queue} has no content-based deduplication, unlike its registration; re-publishing {Count} batch entries " +
+            "with a generated deduplication id. Enable it on the queue or set an explicit PublishOptions.DeduplicationId.",
+            Name, retry.Count);
+
+        foreach (var entry in retry)
+            entry.MessageDeduplicationId = NewDeduplicationId();
+
+        var second = await InvokeAsync(
+            () => Client.SendMessageBatchAsync(
+                new SendMessageBatchRequest { QueueUrl = request.QueueUrl, Entries = retry }, cancellationToken),
+            "publish to");
+
+        // Merge: what the retry published is no longer a failure of this batch.
+        var retried = retry.Select(entry => entry.Id).ToHashSet(StringComparer.Ordinal);
+
+        return new SendMessageBatchResponse
+        {
+            Successful = [.. response.Successful ?? [], .. second.Successful ?? []],
+            Failed =
+            [
+                .. failures.Where(failure => !retried.Contains(failure.Id)),
+                .. second.Failed ?? [],
+            ],
+        };
+    }
+
+    static bool RequiresDeduplicationId(BatchResultErrorEntry failure)
+        => failure.Code == "InvalidParameterValue"
+            && failure.Message?.Contains("MessageDeduplicationId", StringComparison.Ordinal) == true;
 
     static bool RequiresDeduplicationId(MessagingException ex)
         => ex.InnerException is AmazonSQSException { ErrorCode: "InvalidParameterValue" } inner

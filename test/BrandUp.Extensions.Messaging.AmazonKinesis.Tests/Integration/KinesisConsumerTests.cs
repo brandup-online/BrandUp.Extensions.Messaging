@@ -269,6 +269,34 @@ public class KinesisConsumerTests : IAsyncLifetime
         Assert.Empty(leases.Leases);
     }
 
+    [KinesisFact]
+    public async Task Reader_HandlesABatchPublishedAtOnce_InOrder()
+    {
+        var handled = new Handled();
+        var checkpoints = new InMemoryCheckpointStore();
+
+        using var host = BuildReader(handled, checkpoints);
+        await host.StartAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            var results = await host.Services.GetRequiredService<IMessageStream<OrderEvent>>().PublishAsync(
+                [.. Enumerable.Range(1, 5).Select(i => new PublishMessage<OrderEvent>(
+                    new OrderEvent { Number = i }, new PublishOptions { GroupId = "same-shard" }))]);
+
+            Assert.Equal(5, results.Count);
+            Assert.All(results, result => Assert.NotEmpty(result.SequenceNumber!));
+
+            await WaitForAsync(() => handled.Numbers.Count >= 5, TimeSpan.FromSeconds(60));
+
+            // One partition key, one shard: PutRecords keeps the order of the batch.
+            Assert.Equal([1, 2, 3, 4, 5], handled.Numbers);
+        }
+        finally
+        {
+            await host.StopAsync(TestContext.Current.CancellationToken);
+        }
+    }
+
     public class OrderEvent
     {
         public int Number { get; set; }

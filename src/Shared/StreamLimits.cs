@@ -7,6 +7,12 @@ internal static class StreamLimits
     /// <summary>The Kinesis partition-key limit; Yandex Data Streams follows it.</summary>
     public const int MaxPartitionKeyLength = 256;
 
+    /// <summary>Records one PutRecords call may carry.</summary>
+    public const int MaxBatchRecords = 500;
+
+    /// <summary>Payload one PutRecords call may carry — 5 MiB across all its records.</summary>
+    public const int MaxBatchBytes = 5 * 1024 * 1024;
+
     /// <summary>
     /// Checks the options against what a stream can do and returns the partition key to publish with.
     /// Options a stream cannot honour are refused rather than dropped: silently ignoring a delay would

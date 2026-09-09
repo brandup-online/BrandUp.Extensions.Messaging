@@ -31,4 +31,12 @@ public class FakeMessageStream<TMessage>(InMemoryMessageBus bus, string name, IM
         // A real stream answers with the record's sequence number, and uses it as the message id.
         return Task.FromResult(new PublishResult { MessageId = added.MessageId, SequenceNumber = added.MessageId });
     }
+
+    public Task<IReadOnlyList<PublishResult>> PublishAsync(
+        IReadOnlyCollection<PublishMessage<TMessage>> messages, CancellationToken cancellationToken = default)
+        => FakePublications.PublishEachAsync(
+            messages,
+            (item, parameterName) => StreamLimits.ResolvePartitionKey(item.Options, parameterName),
+            PublishAsync,
+            cancellationToken);
 }

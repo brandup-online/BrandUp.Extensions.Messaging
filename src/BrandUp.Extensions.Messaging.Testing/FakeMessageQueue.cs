@@ -31,6 +31,14 @@ public class FakeMessageQueue<TMessage>(InMemoryMessageBus bus, string name, IMe
         return Task.FromResult(new PublishResult { MessageId = added.MessageId });
     }
 
+    public Task<IReadOnlyList<PublishResult>> PublishAsync(
+        IReadOnlyCollection<PublishMessage<TMessage>> messages, CancellationToken cancellationToken = default)
+        => FakePublications.PublishEachAsync(
+            messages,
+            (item, parameterName) => SqsLimits.ValidatePublish(item.Options, settings.Fifo, parameterName),
+            PublishAsync,
+            cancellationToken);
+
     public Task<IReadOnlyList<ReceivedMessage<TMessage>>> ReceiveAsync(int maxMessages = 1, TimeSpan? waitTime = null, CancellationToken cancellationToken = default)
     {
         SqsLimits.ValidateReceive(maxMessages, waitTime);

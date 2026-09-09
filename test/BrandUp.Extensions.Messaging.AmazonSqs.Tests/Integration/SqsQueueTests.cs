@@ -234,6 +234,64 @@ public class SqsQueueTests
         Assert.Equal([1m, 2m, 3m], received.Select(m => m.Body.Total));
     }
 
+    [SqsFact]
+    public async Task PublishBatch_DeliversEveryMessage()
+    {
+        await using var provider = CreateProvider(builder => builder.AddQueue<TestOrder>("test-orders-b"));
+        var queue = provider.GetRequiredService<IMessageQueue<TestOrder>>();
+
+        // 25 messages are three SendMessageBatch calls: the split has to be invisible to the caller.
+        var results = await queue.PublishAsync(
+            [.. Enumerable.Range(1, 25).Select(i => new TestOrder { Total = i })]);
+
+        Assert.Equal(25, results.Count);
+        Assert.All(results, result => Assert.NotEmpty(result.MessageId));
+        Assert.Equal(25, results.Select(r => r.MessageId).Distinct().Count());
+
+        var received = new List<decimal>();
+        while (received.Count < 25)
+        {
+            var batch = await queue.ReceiveAsync(maxMessages: 10, waitTime: TimeSpan.FromSeconds(5));
+            if (batch.Count == 0)
+                break;
+
+            received.AddRange(batch.Select(m => m.Body.Total));
+            await queue.DeleteAsync(batch);
+        }
+
+        Assert.Equal([.. Enumerable.Range(1, 25).Select(i => (decimal)i)], [.. received.Order()]);
+    }
+
+    [SqsFact]
+    public async Task PublishBatch_OnFifoQueue_KeepsOrderWithinGroup()
+    {
+        await using var provider = CreateProvider(builder => builder.AddQueue<TestOrder>("test-orders-bf", settings =>
+        {
+            settings.Fifo = true;
+            settings.ContentBasedDeduplication = true;
+        }));
+        var queue = provider.GetRequiredService<IMessageQueue<TestOrder>>();
+
+        // A batch of one group arrives in the order of the batch, so publishing in bulk does not cost
+        // the ordering a FIFO queue is chosen for.
+        await queue.PublishAsync(
+            [.. Enumerable.Range(1, 12).Select(i => new PublishMessage<TestOrder>(
+                new TestOrder { Total = i }, new PublishOptions { GroupId = "g1" }))]);
+
+        var received = new List<decimal>();
+        while (received.Count < 12)
+        {
+            var batch = await queue.ReceiveAsync(maxMessages: 10, waitTime: TimeSpan.FromSeconds(5));
+            if (batch.Count == 0)
+                break;
+
+            received.AddRange(batch.Select(m => m.Body.Total));
+            await queue.DeleteAsync(batch);
+        }
+
+        Assert.Equal([.. Enumerable.Range(1, 12).Select(i => (decimal)i)], received);
+    }
+
     public class TestOrder
     {
         public Guid OrderId { get; set; }

@@ -5,8 +5,14 @@ namespace BrandUp.Extensions.Messaging.Internals;
 
 internal static class SqsLimits
 {
-    /// <summary>Messages per receive and per delete batch.</summary>
+    /// <summary>Messages per receive, per delete batch and per publish batch.</summary>
     public const int MaxBatch = 10;
+
+    /// <summary>
+    /// Payload a single request may carry — 256 KiB, for one message and for a whole batch alike. Used
+    /// to cut a publish batch before SQS rejects it.
+    /// </summary>
+    public const int MaxBatchBytes = 262_144;
 
     public static readonly TimeSpan MaxWaitTime = TimeSpan.FromSeconds(20);
     public static readonly TimeSpan MaxPublishDelay = TimeSpan.FromMinutes(15);

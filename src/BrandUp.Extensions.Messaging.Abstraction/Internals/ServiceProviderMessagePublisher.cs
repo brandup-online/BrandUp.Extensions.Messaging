@@ -12,11 +12,22 @@ internal sealed class ServiceProviderMessagePublisher(IServiceProvider servicePr
     {
         ArgumentNullException.ThrowIfNull(message);
 
-        var sender = (IMessageSender<TMessage>?)serviceProvider.GetService(typeof(IMessageSender<TMessage>))
+        return SenderOf<TMessage>().PublishAsync(message, options, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<PublishResult>> PublishAsync<TMessage>(
+        IReadOnlyCollection<PublishMessage<TMessage>> messages, CancellationToken cancellationToken = default)
+        where TMessage : class
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+
+        return SenderOf<TMessage>().PublishAsync(messages, cancellationToken);
+    }
+
+    IMessageSender<TMessage> SenderOf<TMessage>()
+        where TMessage : class
+        => (IMessageSender<TMessage>?)serviceProvider.GetService(typeof(IMessageSender<TMessage>))
             ?? throw new MessagingException(
                 $"No queue or stream is registered for message type {typeof(TMessage).FullName}. " +
                 $"Register it with AddQueue<{typeof(TMessage).Name}>() or AddStream<{typeof(TMessage).Name}>().");
-
-        return sender.PublishAsync(message, options, cancellationToken);
-    }
 }
