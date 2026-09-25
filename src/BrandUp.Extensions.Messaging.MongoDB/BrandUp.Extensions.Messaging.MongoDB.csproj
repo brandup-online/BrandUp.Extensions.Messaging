@@ -1,34 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <RootNamespace>BrandUp.Extensions.Messaging</RootNamespace>
-  </PropertyGroup>
-
-  <PropertyGroup>
-    <Authors>Dmitry Kovyazin</Authors>
-    <Company>BrandUp</Company>
     <Title>BrandUp.Extensions.Messaging.MongoDB</Title>
     <Description>MongoDB checkpoint and shard lease stores for BrandUp.Extensions.Messaging stream readers: keeps the read position of every shard per consumer group, so a reader resumes where it stopped, and leases shards so several instances of one group can read a stream together.</Description>
     <PackageTags>messaging;stream;checkpoint;lease;kinesis;datastreams;mongodb</PackageTags>
-    <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.Messaging</PackageProjectUrl>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageIcon>icon.png</PackageIcon>
-    <GenerateDocumentationFile>True</GenerateDocumentationFile>
-    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!-- Transitive pinning would promote Microsoft.Extensions.Logging.Abstractions (via MongoDB.Driver) to a package dependency -->
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
-    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
-    <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.12" />
-    <PackageReference Include="MongoDB.Driver" Version="3.11.1" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="MongoDB.Driver" />
   </ItemGroup>
 
   <ItemGroup>

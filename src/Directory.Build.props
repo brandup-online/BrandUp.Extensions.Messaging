@@ -1,0 +1,23 @@
+<Project>
+
+	<Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)..'))" />
+
+	<!-- Shared NuGet package metadata of the library projects -->
+	<PropertyGroup>
+		<Authors>Dmitry Kovyazin</Authors>
+		<Company>BrandUp</Company>
+		<PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.Messaging</PackageProjectUrl>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+		<PackageIcon>icon.png</PackageIcon>
+		<GenerateDocumentationFile>True</GenerateDocumentationFile>
+		<!-- Imported before the SDK props, so keep the SDK default (1701;1702) it would otherwise skip -->
+		<NoWarn Condition="'$(NoWarn)' == ''">1701;1702</NoWarn>
+		<NoWarn>$(NoWarn);CS1591</NoWarn>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="$(MSBuildThisFileDirectory)..\README.md" Pack="true" PackagePath="\" Visible="false" />
+		<None Include="$(MSBuildThisFileDirectory)..\icon.png" Pack="true" PackagePath="\" Visible="false" />
+	</ItemGroup>
+
+</Project>
