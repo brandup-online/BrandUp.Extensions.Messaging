@@ -8,8 +8,6 @@ resources:
 
 variables:
   - group: public-nuget
-  - name: vmImageName
-    value: "ubuntu-latest"
   - name: restore-projects
     value: "**/*.csproj"
   - name: test-projects
@@ -58,12 +56,14 @@ stages:
               packageType: "sdk"
               version: "10.x"
 
+          # Sources come from the repository's nuget.config (nuget.org only), the same ones a local restore uses.
           - task: DotNetCoreCLI@2
             displayName: "dotnet restore"
             inputs:
               command: "restore"
               projects: $(restore-projects)
-              feedRestore: "BrandUp"
+              feedsToUse: "config"
+              nugetConfigPath: "nuget.config"
 
           - task: DotNetCoreCLI@2
             displayName: "dotnet build"
@@ -82,7 +82,7 @@ stages:
               projects: $(test-projects)
               arguments: >
                 --configuration $(buildConfiguration) --no-build --no-restore
-                --results-directory $(Agent.TempDirectory)/TestResults
+                --results-directory "$(Agent.TempDirectory)/TestResults"
                 --report-trx
                 --coverage --coverage-output-format cobertura
               publishTestResults: false
@@ -114,7 +114,7 @@ stages:
               command: "custom"
               projects: $(pack-projects)
               custom: "pack"
-              arguments: "--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory) /p:Version=$(Build.BuildNumber)"
+              arguments: '--configuration $(buildConfiguration) --output "$(Build.ArtifactStagingDirectory)" /p:Version=$(Build.BuildNumber)'
 
           - publish: $(build.artifactstagingdirectory)
             displayName: publish artifact
@@ -124,7 +124,7 @@ stages:
       - job: IntegrationTests
         displayName: Integration tests (ElasticMQ, LocalStack, MongoDB)
         pool:
-          vmImage: $(vmImageName)
+          name: Test
         steps:
           - checkout: self
             fetchDepth: 1
@@ -138,25 +138,48 @@ stages:
 
           # ElasticMQ backs the SQS tests, LocalStack the Kinesis reader, MongoDB the checkpoint store.
           # LocalStack is pinned to the community edition: newer images require a licence.
-          - script: |
-              docker run -d --name elasticmq -p 9324:9324 softwaremill/elasticmq-native
-              docker run -d --name localstack -p 4566:4566 -e SERVICES=kinesis -e EAGER_SERVICE_LOADING=1 localstack/localstack:3.8
-              docker run -d --name mongo -p 27017:27017 mongo:7
+          # A script step runs in cmd on the Windows agents of the Test pool, so the containers are started
+          # from Windows PowerShell. Native commands report through $LASTEXITCODE, not exceptions, so
+          # errors are checked explicitly. Containers left over by an interrupted run on the persistent
+          # agent are removed first, otherwise their names and ports would be taken.
+          - powershell: |
+              $ErrorActionPreference = 'Continue'
+              $ProgressPreference = 'SilentlyContinue'
 
-              wait_for() {
-                echo "waiting for $1..."
-                for i in $(seq 1 60); do
-                  if eval "$2" >/dev/null 2>&1; then echo "$1 is ready"; return 0; fi
-                  sleep 2
-                done
-                echo "$1 did not become ready in time"; return 1
+              docker rm -f elasticmq localstack mongo 2>&1 | Out-Null
+              docker run -d --name elasticmq -p 9324:9324 softwaremill/elasticmq-native
+              if ($LASTEXITCODE -ne 0) { exit 1 }
+              docker run -d --name localstack -p 4566:4566 -e SERVICES=kinesis -e EAGER_SERVICE_LOADING=1 localstack/localstack:3.8
+              if ($LASTEXITCODE -ne 0) { exit 1 }
+              docker run -d --name mongo -p 27017:27017 mongo:7
+              if ($LASTEXITCODE -ne 0) { exit 1 }
+
+              function Wait-For([string] $name, [scriptblock] $probe) {
+                Write-Host "waiting for $name..."
+                for ($i = 0; $i -lt 60; $i++) {
+                  try { if (& $probe) { Write-Host "$name is ready"; return } } catch { }
+                  Start-Sleep -Seconds 2
+                }
+                Write-Host "$name did not become ready in time"
+                exit 1
               }
 
-              wait_for "ElasticMQ" "curl -s -o /dev/null http://localhost:9324" || exit 1
-              wait_for "LocalStack Kinesis" "curl -s http://localhost:4566/_localstack/health | grep -q '\"kinesis\": *\"\\(available\\|running\\)\"'" || exit 1
-              wait_for "MongoDB" "docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 })'" || exit 1
+              # Any HTTP answer means ElasticMQ is up; a refused connection carries no response.
+              Wait-For "ElasticMQ" {
+                try { Invoke-WebRequest http://localhost:9324 -UseBasicParsing -TimeoutSec 5 | Out-Null; $true }
+                catch { $null -ne $_.Exception.Response }
+              }
+              Wait-For "LocalStack Kinesis" {
+                (Invoke-RestMethod http://localhost:4566/_localstack/health -TimeoutSec 5).services.kinesis -in 'available', 'running'
+              }
+              Wait-For "MongoDB" {
+                docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 })' 2>&1 | Out-Null
+                $LASTEXITCODE -eq 0
+              }
             displayName: "start service containers"
 
+          # Some test projects have no integration tests; the filter leaves them empty, and Microsoft.Testing.Platform
+          # reports an empty run as exit code 8, which is not a failure here.
           - task: DotNetCoreCLI@2
             displayName: "dotnet test (integration)"
             env:
@@ -174,7 +197,8 @@ stages:
               arguments: >
                 --configuration $(buildConfiguration)
                 --filter-trait Category=Integration
-                --results-directory $(Agent.TempDirectory)/TestResults
+                --ignore-exit-code 8
+                --results-directory "$(Agent.TempDirectory)/TestResults"
                 --report-trx
                 --coverage --coverage-output-format cobertura
               publishTestResults: false
@@ -209,23 +233,6 @@ stages:
             displayName: "stop service containers"
             condition: always()
 
-      - job: GitTag
-        displayName: Add git tag
-        dependsOn: [BuildNet, IntegrationTests]
-        condition: succeeded()
-        steps:
-          - checkout: self
-            fetchDepth: 1
-            clean: "true"
-            persistCredentials: "true"
-
-          - powershell: |
-              git config --global user.name "AzureDevOps Agent"
-              git tag "$(Build.BuildNumber)" --force
-              git push origin "$(Build.BuildNumber)" --force
-              Write-Output "Tagging $(Build.Repository.Name) with $(Build.BuildNumber)"
-            displayName: set git tag
-
   - stage: Production
     displayName: Deploy stage
     dependsOn: Build
@@ -234,7 +241,7 @@ stages:
         condition: succeeded()
         displayName: Production
         pool:
-          vmImage: $(vmImageName)
+          name: Test
         environment: $(envName)
         strategy:
           runOnce:
@@ -252,6 +259,23 @@ stages:
                     command: custom
                     custom: nuget
                     arguments: >
-                      push $(Pipeline.Workspace)/net/*.nupkg
+                      push "$(Pipeline.Workspace)/net/*.nupkg"
                       -s $(nuget-api-url)
                       -k $(nuget-api-key)
+
+      - job: GitTag
+        displayName: Add git tag
+        dependsOn: [Production]
+        condition: succeeded()
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            clean: "true"
+            persistCredentials: "true"
+
+          - script: |
+              echo Tagging $(Build.Repository.Name) with $(Build.BuildNumber)
+              git config user.name "AzureDevOps Agent"
+              git tag "$(Build.BuildNumber)" --force
+              git push origin "$(Build.BuildNumber)" --force
+            displayName: set git tag
