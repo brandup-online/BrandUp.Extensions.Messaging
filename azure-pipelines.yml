@@ -122,7 +122,7 @@ stages:
             artifact: net
 
       - job: IntegrationTests
-        displayName: Integration tests (ElasticMQ, LocalStack, MongoDB)
+        displayName: Integration tests (ElasticMQ, kinesis-mock, MongoDB)
         pool:
           name: Test
         steps:
@@ -136,47 +136,11 @@ stages:
               packageType: "sdk"
               version: "10.x"
 
-          # ElasticMQ backs the SQS tests, LocalStack the Kinesis reader, MongoDB the checkpoint store.
-          # LocalStack is pinned to the community edition: newer images require a licence.
-          # A script step runs in cmd on the Windows agents of the Test pool, so the containers are started
-          # from Windows PowerShell. Native commands report through $LASTEXITCODE, not exceptions, so
-          # errors are checked explicitly. Containers left over by an interrupted run on the persistent
-          # agent are removed first, otherwise their names and ports would be taken.
-          - powershell: |
-              $ErrorActionPreference = 'Continue'
-              $ProgressPreference = 'SilentlyContinue'
-
-              docker rm -f elasticmq localstack mongo 2>&1 | Out-Null
-              docker run -d --name elasticmq -p 9324:9324 softwaremill/elasticmq-native
-              if ($LASTEXITCODE -ne 0) { exit 1 }
-              docker run -d --name localstack -p 4566:4566 -e SERVICES=kinesis -e EAGER_SERVICE_LOADING=1 localstack/localstack:3.8
-              if ($LASTEXITCODE -ne 0) { exit 1 }
-              docker run -d --name mongo -p 27017:27017 mongo:7
-              if ($LASTEXITCODE -ne 0) { exit 1 }
-
-              function Wait-For([string] $name, [scriptblock] $probe) {
-                Write-Host "waiting for $name..."
-                for ($i = 0; $i -lt 60; $i++) {
-                  try { if (& $probe) { Write-Host "$name is ready"; return } } catch { }
-                  Start-Sleep -Seconds 2
-                }
-                Write-Host "$name did not become ready in time"
-                exit 1
-              }
-
-              # Any HTTP answer means ElasticMQ is up; a refused connection carries no response.
-              Wait-For "ElasticMQ" {
-                try { Invoke-WebRequest http://localhost:9324 -UseBasicParsing -TimeoutSec 5 | Out-Null; $true }
-                catch { $null -ne $_.Exception.Response }
-              }
-              Wait-For "LocalStack Kinesis" {
-                (Invoke-RestMethod http://localhost:4566/_localstack/health -TimeoutSec 5).services.kinesis -in 'available', 'running'
-              }
-              Wait-For "MongoDB" {
-                docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 })' 2>&1 | Out-Null
-                $LASTEXITCODE -eq 0
-              }
-            displayName: "start service containers"
+          # ElasticMQ backs the SQS tests, kinesis-mock the Kinesis reader, MongoDB the checkpoint store. The agents
+          # of the Test pool run Windows without Docker, so they run as plain processes (LocalStack needs Docker);
+          # the script downloads them once into the tools directory the agent keeps between runs.
+          - powershell: ci/integration-services.ps1 -Action Start -ToolsDirectory "$(Agent.ToolsDirectory)" -StateDirectory "$(Agent.TempDirectory)/services"
+            displayName: "start service emulators"
 
           # Some test projects have no integration tests; the filter leaves them empty, and Microsoft.Testing.Platform
           # reports an empty run as exit code 8, which is not a failure here.
@@ -190,7 +154,7 @@ stages:
               KINESIS_ACCESS_KEY: test
               KINESIS_SECRET_KEY: test
               KINESIS_REGION: us-east-1
-              MONGO_CONNECTION_STRING: mongodb://localhost:27017
+              MONGO_CONNECTION_STRING: mongodb://127.0.0.1:27117
             inputs:
               command: test
               projects: $(test-projects)
@@ -210,7 +174,7 @@ stages:
               testResultsFormat: VSTest
               testResultsFiles: "*.trx"
               searchFolder: $(Agent.TempDirectory)/TestResults
-              testRunTitle: "integration tests (ElasticMQ, LocalStack, MongoDB)"
+              testRunTitle: "integration tests (ElasticMQ, kinesis-mock, MongoDB)"
               failTaskOnFailedTests: true
 
           # Kept as an artifact rather than published as a second coverage result: this job runs on a
@@ -229,9 +193,14 @@ stages:
             condition: succeededOrFailed()
             artifact: coverage-integration
 
-          - script: docker rm -f elasticmq localstack mongo
-            displayName: "stop service containers"
+          - powershell: ci/integration-services.ps1 -Action Stop -StateDirectory "$(Agent.TempDirectory)/services"
+            displayName: "stop service emulators"
             condition: always()
+
+          - publish: $(Agent.TempDirectory)/services/logs
+            displayName: "publish service emulator logs"
+            condition: failed()
+            artifact: integration-services-$(System.JobAttempt)
 
   - stage: Production
     displayName: Deploy stage

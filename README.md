@@ -398,13 +398,28 @@ IMessageHandler<TMessage> ◄─┬─ SqsConsumerService<TMessage>      (long p
 
 ## Интеграционные тесты
 
-Гоняются против настоящих серверов — аналогично MinIO в BrandUp.Extensions.ObjectStorage. Без соответствующей переменной окружения тесты помечаются как skipped, поэтому локально набор остаётся зелёным без контейнеров:
+Гоняются против настоящих серверов — аналогично S3 в BrandUp.Extensions.ObjectStorage. Без соответствующей переменной окружения тесты помечаются как skipped, поэтому локально набор остаётся зелёным без серверов:
 
 | Сервер | Что проверяет | Переменная |
 | --- | --- | --- |
 | [ElasticMQ](https://github.com/softwaremill/elasticmq) | Очереди SQS | `SQS_SERVICE_URL` |
-| [LocalStack](https://github.com/localstack/localstack) (community, `:3.8`) | Чтение стримов Kinesis | `KINESIS_SERVICE_URL` |
-| MongoDB | Хранилище чекпоинтов | `MONGO_CONNECTION_STRING` |
+| [kinesis-mock](https://github.com/etspaceman/kinesis-mock) или [LocalStack](https://github.com/localstack/localstack) (community, `:3.8`) | Чтение стримов Kinesis | `KINESIS_SERVICE_URL` |
+| MongoDB | Хранилище чекпоинтов и аренд | `MONGO_CONNECTION_STRING` |
+
+На Windows без Docker серверы поднимает тот же скрипт, что и CI: ElasticMQ и kinesis-mock на переносимом JDK и нативный `mongod`, скачанные один раз в кэш с проверкой SHA-256:
+
+```powershell
+ci/integration-services.ps1 -Action Start
+
+$env:SQS_SERVICE_URL = "http://localhost:9324"
+$env:KINESIS_SERVICE_URL = "http://localhost:4566"
+$env:MONGO_CONNECTION_STRING = "mongodb://127.0.0.1:27117"
+dotnet test --filter-trait Category=Integration --ignore-exit-code 8
+
+ci/integration-services.ps1 -Action Stop
+```
+
+С Docker:
 
 ```powershell
 docker run -d --name elasticmq -p 9324:9324 softwaremill/elasticmq-native
